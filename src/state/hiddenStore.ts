@@ -1,22 +1,20 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useCallback } from 'react';
 
 const HIDDEN_PRS_KEY = 'github_pr_panel_hidden_prs';
 
 export function useHiddenPRs() {
-    const [hiddenIds, setHiddenIdsState] = useState<number[]>([]);
-    const [isLoaded, setIsLoaded] = useState(false);
-
-    useEffect(() => {
+    // Initialize synchronously from storage (avoids setState-in-effect).
+    const [hiddenIds, setHiddenIdsState] = useState<number[]>(() => {
         const stored = localStorage.getItem(HIDDEN_PRS_KEY);
         if (stored) {
             try {
-                setHiddenIdsState(JSON.parse(stored));
+                return JSON.parse(stored);
             } catch {
                 // Invalid JSON
             }
         }
-        setIsLoaded(true);
-    }, []);
+        return [];
+    });
 
     const hidePR = useCallback((id: number) => {
         setHiddenIdsState((prev) => {
@@ -39,5 +37,5 @@ export function useHiddenPRs() {
         return hiddenIds.includes(id);
     }, [hiddenIds]);
 
-    return { hiddenIds, hidePR, unhidePR, isHidden, isLoaded };
+    return { hiddenIds, hidePR, unhidePR, isHidden };
 }

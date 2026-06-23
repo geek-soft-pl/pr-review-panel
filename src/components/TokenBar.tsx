@@ -124,7 +124,7 @@ export const TokenBar: React.FC<TokenBarProps> = ({
                             Logged in as <strong>{user.login}</strong>
                         </Typography>
                         <Chip
-                            label={storageType === 'local' ? 'Saved' : storageType === 'env' ? 'From .env' : 'Session'}
+                            label={storageType === 'local' ? 'Saved' : 'Session'}
                             size="small"
                             variant="outlined"
                         />

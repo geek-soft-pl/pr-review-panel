@@ -157,10 +157,14 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const [latestMergedFetchTime, setLatestMergedFetchTime] = useState<Date | null>(null);
 
     const [teamSlugs, setTeamSlugs] = useState<string[]>([]);
+    const [teamsLoaded, setTeamsLoaded] = useState(false);
 
     const { hidePR, unhidePR, isHidden } = useHiddenPRs();
 
-    const abortController = useRef<AbortController | null>(null);
+    // Generation guards: a newer fetch always wins, so a slow in-flight request
+    // (e.g. from the 30-min auto-refresh) can't overwrite fresher results.
+    const myOpenReqId = useRef(0);
+    const openReqId = useRef(0);
     const selectedReposStorageKey = useMemo(
         () => getSelectedReposStorageKey(org, userLogin),
         [org, userLogin]
@@ -214,11 +218,31 @@ export const Dashboard: React.FC<DashboardProps> = ({
         setSelectedRepos(prev => prev.filter(repo => availableRepos.includes(repo)));
     }, [availableRepos]);
 
-    // Fetch user's teams in the org on mount
+    // Drop cached review/timeline data when the signed-in user changes, so we
+    // never show another account's review state from the module-level cache.
     useEffect(() => {
+        reviewCache.clear();
+        timelineCache.clear();
+    }, [userLogin]);
+
+    // Fetch the user's teams in the org on mount. The initial PR fetch is gated
+    // on this (see the auto-fetch effect) so "To Review" is queried once, already
+    // knowing the team slugs — instead of firing with no teams and again on load.
+    useEffect(() => {
+        let active = true;
         fetchUserTeamsForOrg(org)
-            .then((teams) => setTeamSlugs(teams.map((t) => t.slug)))
-            .catch((err) => console.error('Failed to fetch user teams:', err));
+            .then((teams) => {
+                if (!active) return;
+                setTeamSlugs(teams.map((t) => t.slug));
+                setTeamsLoaded(true);
+            })
+            .catch((err) => {
+                console.error('Failed to fetch user teams:', err);
+                if (active) setTeamsLoaded(true);
+            });
+        return () => {
+            active = false;
+        };
     }, [org]);
 
     const fetchReviewState = useCallback(
@@ -250,20 +274,21 @@ export const Dashboard: React.FC<DashboardProps> = ({
             const events = await queue.add(() =>
                 fetchTimeline(pr.owner, pr.repo, pr.number)
             );
-            const wasRequested = wasReviewRequestedForMe(events, userLogin);
+            const wasRequested = wasReviewRequestedForMe(events, userLogin, teamSlugs);
             timelineCache.set(cacheKey, { data: wasRequested, timestamp: Date.now() });
             return wasRequested;
         },
-        [userLogin]
+        [userLogin, teamSlugs]
     );
 
     // Fetch my open PRs (authored by me)
     const fetchMyOpenPRs = useCallback(async () => {
+        const reqId = ++myOpenReqId.current;
         setLoadingMyOpen(true);
         setError(null);
         setProgressMyOpen(0);
 
-        const queue = new RequestQueue(8);
+        const queue = new RequestQueue(5);
 
         try {
             const myPRsRaw = await searchMyOpenPRs([org], userLogin);
@@ -310,25 +335,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 setProgressMyOpen(30 + ((i + 1) / myPRsRaw.length) * 70);
             }
 
+            if (reqId !== myOpenReqId.current) return; // superseded by a newer refresh
             setMyOpenPRs(myPRsFormatted);
             setMyOpenRefreshTime(new Date());
         } catch (err) {
-            handleError(err);
+            if (reqId === myOpenReqId.current) handleError(err);
         } finally {
-            setLoadingMyOpen(false);
+            if (reqId === myOpenReqId.current) setLoadingMyOpen(false);
         }
     }, [org, userLogin]);
 
     // Fetch open PRs
     const fetchOpenPRs = useCallback(async () => {
-        abortController.current?.abort();
-        abortController.current = new AbortController();
-
+        const reqId = ++openReqId.current;
         setLoadingOpen(true);
         setError(null);
         setProgressOpen(0);
 
-        const queue = new RequestQueue(8);
+        const queue = new RequestQueue(5);
 
         try {
             const openPRsRaw = await searchOpenPRsForReview([org], userLogin, teamSlugs);
@@ -356,12 +380,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 }
                 setProgressOpen(30 + ((i + 1) / openPRsRaw.length) * 70);
             }
+            if (reqId !== openReqId.current) return; // superseded by a newer refresh
             setOpenPRs(openPRsWithReviews);
             setOpenRefreshTime(new Date());
         } catch (err) {
-            handleError(err);
+            if (reqId === openReqId.current) handleError(err);
         } finally {
-            setLoadingOpen(false);
+            if (reqId === openReqId.current) setLoadingOpen(false);
         }
     }, [org, userLogin, teamSlugs, fetchReviewState]);
 
@@ -415,7 +440,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         setProcessingRepos(true);
         setProgressHistorical(0);
 
-        const queue = new RequestQueue(8);
+        const queue = new RequestQueue(5);
 
         // Filter to selected repos only
         const filteredPRs = allMergedPRs.filter(pr => {
@@ -510,8 +535,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
         }
     };
 
-    // Auto-fetch my open PRs and open PRs for review on mount and every 30 minutes
+    // Auto-fetch on mount (once teams resolve) and every 30 minutes. Gating on
+    // teamsLoaded avoids a duplicate "To Review" fetch on first load: without it,
+    // fetchOpenPRs would run once with no teams, then again when teamSlugs arrive.
     useEffect(() => {
+        if (!teamsLoaded) return;
         fetchMyOpenPRs();
         fetchOpenPRs();
         const intervalId = setInterval(() => {
@@ -519,7 +547,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             fetchOpenPRs();
         }, 30 * 60 * 1000);
         return () => clearInterval(intervalId);
-    }, [fetchMyOpenPRs, fetchOpenPRs]);
+    }, [teamsLoaded, fetchMyOpenPRs, fetchOpenPRs]);
 
     // Lazy load merged PRs list when tab is switched
     const handleTabChange = (_: React.SyntheticEvent, newValue: number) => {
@@ -536,27 +564,9 @@ export const Dashboard: React.FC<DashboardProps> = ({
         } else if (tabValue === 1) {
             fetchOpenPRs();
         } else {
-            // Tab 2: Missing Approve
-            // Do NOT reset historicalLoaded/selectedRepos/historicalPRs if we want delta
-            // If we wanted a hard reset, we would need a separate 'Hard Refresh' or handle it differently.
-            // But here the requirement is "refresh should be optimized".
-            // However, processSelectedRepos depends on selectedRepos.
-            // If we fetch new merged PRs, we might need to re-run processSelectedRepos?
-            // Yes, because processSelectedRepos filters allMergedPRs.
-            // So we just call fetchMergedPRsList(), which updates allMergedPRs.
-            // AND we should probably trigger processSelectedRepos afterwards?
-            // Actually, we need to be careful. React state updates are async.
-            // Better to trigger process logic in useEffect or separate call.
-            // But processSelectedRepos is manual via "Load Reviews".
-            // So we just update the list. The user can click "Load Reviews" again?
-            // Or should we auto-reload reviews?
-            // "if I click refresh it shouldn't send a new request for the whole time range... only missing".
-            // The user implies they want to see the status.
-            // If I just update the list, the "Missing Approve" table (historicalPRs) won't update until I click "Load Reviews".
-            // But the user might expect it to update.
-            // Let's keep existing "Load Reviews" flow for now, but update the underlying list efficiently.
-
-            // To be safe and simple: We just fetch the list delta.
+            // Missing Approve: fetch only newly-merged PRs since the last load
+            // (delta) to keep the request count low. Review statuses for the
+            // selected repos are refreshed separately via "Load Reviews".
             fetchMergedPRsList();
         }
     };

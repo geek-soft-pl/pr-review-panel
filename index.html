@@ -4,7 +4,18 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>github-pr-panel</title>
+    <title>PR Review Panel</title>
+    <!-- Paint the initial background to match the saved theme (default dark),
+         so the pre-React loader doesn't flash the wrong color. -->
+    <script>
+      (function () {
+        try {
+          var mode = localStorage.getItem('github_pr_panel_theme_mode');
+          document.documentElement.style.backgroundColor =
+            mode === 'light' ? '#f6f8fa' : '#0d1117';
+        } catch (e) {}
+      })();
+    </script>
   </head>
   <body>
     <div id="root">
@@ -14,7 +25,6 @@
         justify-content: center;
         align-items: center;
         height: 100vh;
-        background: #0d1117;
       ">
         <div style="
           width: 40px;

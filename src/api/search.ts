@@ -77,8 +77,11 @@ async function searchPRs(query: string, maxItems: number = 200): Promise<ParsedP
     const items: SearchItem[] = [];
     let page = 1;
     const perPage = 100;
+    // GitHub's Search API only exposes the first 1000 results; requesting beyond
+    // that returns HTTP 422, so cap pagination at 1000/perPage pages.
+    const maxPage = Math.ceil(1000 / perPage);
 
-    while (items.length < maxItems) {
+    while (items.length < maxItems && page <= maxPage) {
         const encodedQuery = encodeURIComponent(query);
         const url = `/search/issues?q=${encodedQuery}&per_page=${perPage}&page=${page}`;
 

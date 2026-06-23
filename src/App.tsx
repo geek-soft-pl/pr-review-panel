@@ -7,8 +7,9 @@ import { Dashboard } from './pages/Dashboard';
 import { useToken, useCurrentUser } from './state/tokenStore';
 import { useHistoryWindow } from './state/configStore';
 
-// Hardcoded organization
-const ORGANIZATION = 'geek-soft-pl';
+// Organization whose PRs the panel shows. Configure via VITE_GITHUB_ORG (.env);
+// falls back to the default below when unset.
+const ORGANIZATION = import.meta.env.VITE_GITHUB_ORG || 'geek-soft-pl';
 
 type ThemeMode = 'light' | 'dark';
 const THEME_MODE_STORAGE_KEY = 'github_pr_panel_theme_mode';
@@ -47,7 +48,7 @@ const createAppTheme = (mode: ThemeMode) =>
   });
 
 function App() {
-  const { token, setToken, clearToken, storageType, isLoaded } = useToken();
+  const { token, setToken, clearToken, storageType } = useToken();
   const { user, loading: userLoading, error: userError } = useCurrentUser(token);
   const { days, setDays } = useHistoryWindow();
   const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialThemeMode);
@@ -56,10 +57,6 @@ function App() {
   useEffect(() => {
     localStorage.setItem(THEME_MODE_STORAGE_KEY, themeMode);
   }, [themeMode]);
-
-  if (!isLoaded) {
-    return null; // Wait for storage to load
-  }
 
   const isAuthenticated = !!user && !userError;
 

@@ -11,6 +11,8 @@ export interface FetchOptions {
   headers?: Record<string, string>;
 }
 
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 class GitHubClient {
   private token: string = '';
 
@@ -30,7 +32,7 @@ class GitHubClient {
 
       const rateLimitReset = response.headers.get('X-RateLimit-Reset');
       const resetDate = rateLimitReset
-        ? new Date(parseInt(rateLimitReset) * 1000)
+        ? new Date(parseInt(rateLimitReset, 10) * 1000)
         : undefined;
 
       let message = `GitHub API error: ${response.status}`;
@@ -55,7 +57,8 @@ class GitHubClient {
 
   async fetch<T>(
     endpoint: string,
-    options: FetchOptions = {}
+    options: FetchOptions = {},
+    retriesLeft: number = 2
   ): Promise<T> {
     const url = endpoint.startsWith('http')
       ? endpoint
@@ -76,6 +79,27 @@ class GitHubClient {
       headers,
       body: options.body ? JSON.stringify(options.body) : undefined,
     });
+
+    // Transparently retry on secondary rate limits / abuse detection, which
+    // GitHub signals with 429 or a 403 carrying a Retry-After header. We do NOT
+    // retry primary quota exhaustion (X-RateLimit-Remaining: 0) — that can take
+    // up to an hour to reset and should surface to the user instead.
+    if (!response.ok && retriesLeft > 0) {
+      const remaining = response.headers.get('X-RateLimit-Remaining');
+      const retryAfter = response.headers.get('Retry-After');
+      const isSecondaryLimit =
+        response.status === 429 ||
+        (response.status === 403 && remaining !== '0' && retryAfter !== null);
+
+      if (isSecondaryLimit) {
+        const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : 1000;
+        // Only honor short, sensible backoffs; otherwise surface the error.
+        if (waitMs > 0 && waitMs <= 60_000) {
+          await sleep(waitMs);
+          return this.fetch<T>(endpoint, options, retriesLeft - 1);
+        }
+      }
+    }
 
     return this.handleResponse<T>(response);
   }

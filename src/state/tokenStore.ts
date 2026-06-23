@@ -7,14 +7,10 @@ const TOKEN_SESSION_KEY = 'github_pr_panel_token';
 const TOKEN_LOCAL_KEY = 'github_pr_panel_token_local';
 const USER_CACHE_KEY = 'github_pr_panel_user';
 
-export type StorageType = 'session' | 'local' | 'env';
-
-function getEnvToken(): string {
-    return import.meta.env.VITE_GITHUB_TOKEN || '';
-}
+export type StorageType = 'session' | 'local';
 
 function getStoredToken(): { token: string; storageType: StorageType } {
-    // Priority: localStorage > sessionStorage > env
+    // Priority: localStorage > sessionStorage
     const localToken = localStorage.getItem(TOKEN_LOCAL_KEY);
     if (localToken) {
         return { token: localToken, storageType: 'local' };
@@ -25,31 +21,21 @@ function getStoredToken(): { token: string; storageType: StorageType } {
         return { token: sessionToken, storageType: 'session' };
     }
 
-    const envToken = getEnvToken();
-    if (envToken) {
-        return { token: envToken, storageType: 'env' };
-    }
-
     return { token: '', storageType: 'session' };
 }
 
 export function useToken() {
-    const [token, setTokenState] = useState<string>('');
-    const [storageType, setStorageType] = useState<StorageType>('session');
-    const [isLoaded, setIsLoaded] = useState(false);
+    // Read persisted token synchronously on first render: storage is available
+    // immediately, so there's no flash and no setState-in-effect.
+    const [auth, setAuth] = useState<{ token: string; storageType: StorageType }>(getStoredToken);
+    const { token, storageType } = auth;
 
+    // Keep the API client's token in sync with React state (external system).
     useEffect(() => {
-        const { token: storedToken, storageType: storedType } = getStoredToken();
-        setTokenState(storedToken);
-        setStorageType(storedType);
-        githubClient.setToken(storedToken);
-        setIsLoaded(true);
-    }, []);
+        githubClient.setToken(token);
+    }, [token]);
 
     const setToken = useCallback((newToken: string, persist: boolean = false) => {
-        setTokenState(newToken);
-        githubClient.setToken(newToken);
-
         // Clear old storage
         localStorage.removeItem(TOKEN_LOCAL_KEY);
         sessionStorage.removeItem(TOKEN_SESSION_KEY);
@@ -58,24 +44,22 @@ export function useToken() {
         if (newToken) {
             if (persist) {
                 localStorage.setItem(TOKEN_LOCAL_KEY, newToken);
-                setStorageType('local');
             } else {
                 sessionStorage.setItem(TOKEN_SESSION_KEY, newToken);
-                setStorageType('session');
             }
         }
+
+        setAuth({ token: newToken, storageType: persist ? 'local' : 'session' });
     }, []);
 
     const clearToken = useCallback(() => {
-        setTokenState('');
-        githubClient.setToken('');
         localStorage.removeItem(TOKEN_LOCAL_KEY);
         sessionStorage.removeItem(TOKEN_SESSION_KEY);
         sessionStorage.removeItem(USER_CACHE_KEY);
-        setStorageType('session');
+        setAuth({ token: '', storageType: 'session' });
     }, []);
 
-    return { token, setToken, clearToken, storageType, isLoaded };
+    return { token, setToken, clearToken, storageType };
 }
 
 export function useCurrentUser(token: string) {

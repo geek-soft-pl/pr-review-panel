@@ -1,73 +1,88 @@
-# React + TypeScript + Vite
+# PR Review Panel
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+A lightweight web panel for reviewing GitHub pull requests across an organization.
+It surfaces the three things the stock GitHub UI makes awkward to track:
 
-Currently, two official plugins are available:
+- **My Open PRs** — your own open PRs and, per PR, where each requested reviewer stands.
+- **To Review (Open)** — open PRs where you (or one of your teams) are a requested
+  reviewer, with your current review state. Optionally hide the ones you've approved.
+- **Missing Approve** — recently **merged** PRs (last 30/60/90 days) that were
+  requested from you but never got your approval. You can approve straight from the
+  table, or hide PRs you don't care about.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Babel](https://babeljs.io/) (or [oxc](https://oxc.rs) when used in [rolldown-vite](https://vite.dev/guide/rolldown)) for Fast Refresh
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/) for Fast Refresh
+Built with React 19, TypeScript, Vite and MUI. All data is fetched client-side
+directly from the GitHub REST API using a token you provide — there is no backend.
 
-## React Compiler
+## Prerequisites
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+- Node.js 20+ and npm.
+- A **GitHub token** with read access to the organization's pull requests
+  (and `write` if you want to approve PRs from the panel).
 
-## Expanding the ESLint configuration
+### Which token / scopes
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+- **Fine-grained personal access token** (recommended): grant it access to the
+  relevant org/repos with **Pull requests: Read and write** and
+  **Contents: Read-only**.
+- **Classic PAT**: the `repo` scope covers private repositories. `read:org` helps
+  team-based review requests resolve correctly.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+The token is entered in the UI and stored in your browser (`sessionStorage` by
+default, or `localStorage` if you tick **Remember**). It is **never** committed,
+bundled, or sent anywhere except `api.github.com`.
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+## Setup
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev          # start the dev server (Vite)
 ```
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+Open the printed URL, paste your GitHub token, and you're in.
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+### Configuration
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+Configuration is optional — copy `.env.example` to `.env` to override defaults:
+
+| Variable          | Purpose                                              | Default       |
+| ----------------- | ---------------------------------------------------- | ------------- |
+| `VITE_GITHUB_ORG` | Organization whose PRs the panel shows.              | `geek-soft-pl`|
+
+> `VITE_*` variables are **baked into the built bundle**, so only put non-secret
+> values here. There is intentionally no token env var — every user supplies their
+> own token in the UI.
+
+## Build & deploy
+
+```bash
+npm run build        # type-check (tsc -b) + production build into dist/
+npm run preview      # serve the build locally for a final check
 ```
+
+> **Base path:** the app is built to be served under **`/pr/`** (see `base` in
+> `vite.config.ts`). `npm run preview` honors this; a plain static file server
+> pointed at `dist/` at the domain root will 404 on assets. Serve `dist/` under a
+> `/pr/` path (or change `base` to `'/'` if you deploy at the root).
+
+## Scripts
+
+| Script            | What it does                                  |
+| ----------------- | --------------------------------------------- |
+| `npm run dev`     | Vite dev server with HMR.                     |
+| `npm run build`   | Type-check and produce a production build.    |
+| `npm run preview` | Preview the production build (respects base). |
+| `npm run lint`    | Run ESLint over the project.                  |
+
+## How it works (notes for maintainers)
+
+- `src/api/` — thin wrappers over the GitHub REST API. `githubClient` is a singleton
+  that holds the token, paginates, and transparently retries on secondary rate limits.
+- `src/state/` — small hooks backed by `localStorage`/`sessionStorage`
+  (token, theme, hidden PRs, history window).
+- `src/pages/Dashboard.tsx` — orchestrates the three tabs, throttles per-PR requests
+  through a small concurrency-limited queue, and caches review/timeline lookups for
+  5 minutes to stay within GitHub's rate limits.
+
+GitHub's **Search API** is rate-limited separately and only exposes the first 1000
+results per query, so the panel scopes queries by org and, for the history tab, asks
+you to pick the repos to check before doing per-PR lookups.
