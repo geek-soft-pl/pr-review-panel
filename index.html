@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>github-pr-panel</title>
+  </head>
+  <body>
+    <div id="root">
+      <!-- Loading spinner shown before React hydrates -->
+      <div id="initial-loader" style="
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        height: 100vh;
+        background: #0d1117;
+      ">
+        <div style="
+          width: 40px;
+          height: 40px;
+          border: 3px solid #30363d;
+          border-top-color: #58a6ff;
+          border-radius: 50%;
+          animation: spin 1s linear infinite;
+        "></div>
+      </div>
+      <style>
+        @keyframes spin { to { transform: rotate(360deg); } }
+      </style>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>
