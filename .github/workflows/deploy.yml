@@ -1,0 +1,62 @@
+name: Deploy to S3
+
+# Builds the panel and publishes it to the dev "utils" bucket under the /pr
+# prefix (served by the pr-dashboard Lambda behind CloudFront), then invalidates
+# the CloudFront cache. Auth uses GitHub OIDC -> the shared OIDC-github role.
+#
+# Prerequisite: this repo must be in `github_role_repos` in geeksoft_org_aws
+# (03-workload-dev/github.tf) so the role's trust policy allows it.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# Required for GitHub OIDC token issuance.
+permissions:
+  id-token: write
+  contents: read
+
+# Never run two deploys at once; the newest push wins.
+concurrency:
+  group: deploy-s3
+  cancel-in-progress: true
+
+env:
+  AWS_REGION: eu-central-1
+  AWS_ROLE: arn:aws:iam::337964480073:role/OIDC-github
+  S3_BUCKET: geeksoft-dev-utils
+  S3_PREFIX: pr
+  CF_DISTRIBUTION_ID: E1E3RH6P0D1Y7G
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync build to S3
+        run: aws s3 sync dist/ "s3://${S3_BUCKET}/${S3_PREFIX}/" --delete
+
+      - name: Invalidate CloudFront
+        run: |
+          aws cloudfront create-invalidation \
+            --distribution-id "$CF_DISTRIBUTION_ID" \
+            --paths "/${S3_PREFIX}/*"
