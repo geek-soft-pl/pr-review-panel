@@ -34,11 +34,13 @@ import { fetchTimeline, wasReviewRequestedForMe } from '../api/timeline';
 import { fetchUserTeamsForOrg } from '../api/user';
 import type { GitHubError } from '../api/githubClient';
 import { useHiddenPRs } from '../state/hiddenStore';
+import { useHistoryWindow, usePersistedToggle } from '../state/configStore';
+import { HistorySlider } from '../components/HistorySlider';
+import { fetchPRStatuses, prStatusKey } from '../api/pullStatus';
 
 interface DashboardProps {
     userLogin: string;
     org: string;
-    historyDays: number;
 }
 
 interface TabPanelProps {
@@ -126,7 +128,6 @@ const formatTime = (date: Date) => {
 export const Dashboard: React.FC<DashboardProps> = ({
     userLogin,
     org,
-    historyDays,
 }) => {
     const [tabValue, setTabValue] = useState(0);
     const [myOpenPRs, setMyOpenPRs] = useState<PRItem[]>([]);
@@ -147,7 +148,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const [approveDialogOpen, setApproveDialogOpen] = useState(false);
     const [prToApprove, setPrToApprove] = useState<PRItem | null>(null);
     const [approving, setApproving] = useState(false);
-    const [hideApprovedOpen, setHideApprovedOpen] = useState(false);
+    const [hideApprovedOpen, setHideApprovedOpen] = usePersistedToggle('github_pr_panel_hide_approved_open');
+    const [hideDraftsToReview, setHideDraftsToReview] = usePersistedToggle('github_pr_panel_hide_drafts_to_review');
+    const [hideStatusToReview, setHideStatusToReview] = usePersistedToggle('github_pr_panel_hide_status_to_review');
+    const [hideBotsMyOpen, setHideBotsMyOpen] = usePersistedToggle('github_pr_panel_hide_bots_my_open');
+    const [hideDraftsMyOpen, setHideDraftsMyOpen] = usePersistedToggle('github_pr_panel_hide_drafts_my_open');
 
     // Merged PRs before filtering per-repo
     const [allMergedPRs, setAllMergedPRs] = useState<ParsedPR[]>([]);
@@ -160,6 +165,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const [teamsLoaded, setTeamsLoaded] = useState(false);
 
     const { hidePR, unhidePR, isHidden } = useHiddenPRs();
+    const { days, setDays } = useHistoryWindow();
 
     // Generation guards: a newer fetch always wins, so a slow in-flight request
     // (e.g. from the 30-min auto-refresh) can't overwrite fresher results.
@@ -196,11 +202,53 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return { visiblePRs: visible, hiddenPRs: hidden };
     }, [historicalPRs, isHidden]);
 
-    // Filter open PRs based on hideApprovedOpen setting
+    // Filter open PRs: optionally hide drafts and/or already-approved PRs.
     const filteredOpenPRs = useMemo(() => {
-        if (!hideApprovedOpen) return openPRs;
-        return openPRs.filter(pr => pr.reviewState !== 'APPROVED');
-    }, [openPRs, hideApprovedOpen]);
+        let list = openPRs;
+        if (hideDraftsToReview) {
+            list = list.filter(pr => !pr.prStatus?.isDraft);
+        }
+        if (hideApprovedOpen) {
+            list = list.filter(pr => pr.reviewState !== 'APPROVED');
+        }
+        return list;
+    }, [openPRs, hideApprovedOpen, hideDraftsToReview]);
+
+    const draftCountOpen = useMemo(
+        () => openPRs.filter(pr => pr.prStatus?.isDraft).length,
+        [openPRs]
+    );
+
+    // My Open PRs: optionally hide drafts and/or drop bot reviewers.
+    const filteredMyOpenPRs = useMemo(() => {
+        let list = myOpenPRs;
+        if (hideDraftsMyOpen) {
+            list = list.filter(pr => !pr.prStatus?.isDraft);
+        }
+        if (hideBotsMyOpen) {
+            list = list.map(pr => ({
+                ...pr,
+                reviewers: pr.reviewers?.filter(r => !r.isBot),
+            }));
+        }
+        return list;
+    }, [myOpenPRs, hideDraftsMyOpen, hideBotsMyOpen]);
+
+    const draftCount = useMemo(
+        () => myOpenPRs.filter(pr => pr.prStatus?.isDraft).length,
+        [myOpenPRs]
+    );
+
+    // Distinct bot accounts appearing as reviewers across my open PRs.
+    const botReviewerCount = useMemo(() => {
+        const bots = new Set<string>();
+        myOpenPRs.forEach(pr =>
+            pr.reviewers?.forEach(r => {
+                if (r.isBot) bots.add(r.login.toLowerCase());
+            })
+        );
+        return bots.size;
+    }, [myOpenPRs]);
 
     useEffect(() => {
         const savedRepos = loadSelectedRepos(selectedReposStorageKey);
@@ -335,6 +383,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 setProgressMyOpen(30 + ((i + 1) / myPRsRaw.length) * 70);
             }
 
+            // Enrich with PR status (review decision / mergeability) via one
+            // batched GraphQL query. Best-effort: failures leave status empty.
+            try {
+                const statuses = await fetchPRStatuses(
+                    myPRsRaw.map((pr) => ({ owner: pr.owner, repo: pr.repo, number: pr.number }))
+                );
+                myPRsFormatted.forEach((pr) => {
+                    const [owner, repo] = pr.repoFullName.split('/');
+                    pr.prStatus = statuses.get(prStatusKey(owner, repo, pr.number));
+                });
+            } catch (err) {
+                console.error('Failed to fetch PR statuses:', err);
+            }
+
             if (reqId !== myOpenReqId.current) return; // superseded by a newer refresh
             setMyOpenPRs(myPRsFormatted);
             setMyOpenRefreshTime(new Date());
@@ -380,6 +442,23 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 }
                 setProgressOpen(30 + ((i + 1) / openPRsRaw.length) * 70);
             }
+
+            // Enrich with PR status via one batched GraphQL query (best-effort).
+            try {
+                const statuses = await fetchPRStatuses(
+                    openPRsWithReviews.map((pr) => {
+                        const [owner, repo] = pr.repoFullName.split('/');
+                        return { owner, repo, number: pr.number };
+                    })
+                );
+                openPRsWithReviews.forEach((pr) => {
+                    const [owner, repo] = pr.repoFullName.split('/');
+                    pr.prStatus = statuses.get(prStatusKey(owner, repo, pr.number));
+                });
+            } catch (err) {
+                console.error('Failed to fetch PR statuses:', err);
+            }
+
             if (reqId !== openReqId.current) return; // superseded by a newer refresh
             setOpenPRs(openPRsWithReviews);
             setOpenRefreshTime(new Date());
@@ -391,15 +470,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
     }, [org, userLogin, teamSlugs, fetchReviewState]);
 
     // Step 1: Fetch merged PRs list (fast, no per-PR requests)
-    const fetchMergedPRsList = useCallback(async () => {
+    const fetchMergedPRsList = useCallback(async (opts?: { fullReload?: boolean; windowDays?: number }) => {
         setLoadingHistorical(true);
         setProgressHistorical(0);
         setError(null);
 
         try {
-            // If we have loaded before, fetch delta. Otherwise full range.
-            let since: number | Date = historyDays;
-            if (historicalLoaded && latestMergedFetchTime) {
+            // Full fetch over the selected window by default; once loaded,
+            // refreshes fetch only the delta — unless a full reload is requested
+            // (e.g. the history window changed via the slider).
+            let since: number | Date = opts?.windowDays ?? days;
+            if (!opts?.fullReload && historicalLoaded && latestMergedFetchTime) {
                 since = latestMergedFetchTime;
             }
 
@@ -428,7 +509,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         } finally {
             setLoadingHistorical(false);
         }
-    }, [org, historyDays, historicalLoaded, latestMergedFetchTime]);
+    }, [org, days, historicalLoaded, latestMergedFetchTime]);
 
     // Step 2: Process selected repos (per-PR requests only for selected repos)
     const processSelectedRepos = useCallback(async () => {
@@ -571,7 +652,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
         }
     };
 
-    const isLoading = loadingMyOpen || loadingOpen || loadingHistorical || processingRepos;
+    // The Refresh button reflects only the current tab's loading state, so work
+    // on one tab no longer disables refresh on the others.
+    const currentTabLoading =
+        tabValue === 0 ? loadingMyOpen
+            : tabValue === 1 ? loadingOpen
+                : loadingHistorical || processingRepos;
 
     return (
         <Box>
@@ -606,11 +692,11 @@ export const Dashboard: React.FC<DashboardProps> = ({
                     )}
                     <Button
                         variant="contained"
-                        startIcon={isLoading ? <CircularProgress size={16} color="inherit" /> : <Refresh />}
+                        startIcon={currentTabLoading ? <CircularProgress size={16} color="inherit" /> : <Refresh />}
                         onClick={handleRefresh}
-                        disabled={isLoading}
+                        disabled={currentTabLoading}
                     >
-                        {isLoading ? 'Loading...' : 'Refresh'}
+                        {currentTabLoading ? 'Loading...' : 'Refresh'}
                     </Button>
                 </Box>
             </Box>
@@ -678,20 +764,72 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             </Badge>
                         }
                         iconPosition="start"
-                        label={`Missing Approve (last ${historyDays}d)`}
+                        label={`Missing Approve (last ${days}d)`}
                     />
                 </Tabs>
             </Box>
 
             {/* Tab panels */}
             <TabPanel value={tabValue} index={0}>
-                <PRTable items={myOpenPRs} loading={loadingMyOpen} showReviewColumn={false} showReviewersColumn={true} />
+                <PRTable items={filteredMyOpenPRs} loading={loadingMyOpen} showReviewColumn={false} showReviewersColumn={true} showStatusColumn showAuthorColumn={false} />
+                {!loadingMyOpen && myOpenPRs.length > 0 && (
+                    <Box sx={{ mt: 2, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                            Options:
+                        </Typography>
+                        <FormControlLabel
+                            control={
+                                <Checkbox
+                                    checked={hideDraftsMyOpen}
+                                    onChange={(e) => setHideDraftsMyOpen(e.target.checked)}
+                                    size="small"
+                                />
+                            }
+                            label={
+                                <Typography variant="body2" color="text.secondary">
+                                    Hide drafts ({draftCount})
+                                </Typography>
+                            }
+                        />
+                        <FormControlLabel
+                            control={
+                                <Checkbox
+                                    checked={hideBotsMyOpen}
+                                    onChange={(e) => setHideBotsMyOpen(e.target.checked)}
+                                    size="small"
+                                />
+                            }
+                            label={
+                                <Typography variant="body2" color="text.secondary">
+                                    Hide bot reviewers ({botReviewerCount})
+                                </Typography>
+                            }
+                        />
+                    </Box>
+                )}
             </TabPanel>
 
             <TabPanel value={tabValue} index={1}>
-                <PRTable items={filteredOpenPRs} loading={loadingOpen} />
+                <PRTable items={filteredOpenPRs} loading={loadingOpen} showStatusColumn={!hideStatusToReview} dimStatusColumn />
                 {!loadingOpen && openPRs.length > 0 && (
-                    <Box sx={{ mt: 2 }}>
+                    <Box sx={{ mt: 2, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
+                        <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 600 }}>
+                            Options:
+                        </Typography>
+                        <FormControlLabel
+                            control={
+                                <Checkbox
+                                    checked={hideDraftsToReview}
+                                    onChange={(e) => setHideDraftsToReview(e.target.checked)}
+                                    size="small"
+                                />
+                            }
+                            label={
+                                <Typography variant="body2" color="text.secondary">
+                                    Hide drafts ({draftCountOpen})
+                                </Typography>
+                            }
+                        />
                         <FormControlLabel
                             control={
                                 <Checkbox
@@ -703,6 +841,20 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             label={
                                 <Typography variant="body2" color="text.secondary">
                                     Hide approved ({openPRs.filter(pr => pr.reviewState === 'APPROVED').length})
+                                </Typography>
+                            }
+                        />
+                        <FormControlLabel
+                            control={
+                                <Checkbox
+                                    checked={hideStatusToReview}
+                                    onChange={(e) => setHideStatusToReview(e.target.checked)}
+                                    size="small"
+                                />
+                            }
+                            label={
+                                <Typography variant="body2" color="text.secondary">
+                                    Hide status column
                                 </Typography>
                             }
                         />
@@ -755,6 +907,17 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             <Typography variant="body2" color="text.secondary">
                                 {allMergedPRs.length} merged PRs in {availableRepos.length} repos
                             </Typography>
+
+                            <Box sx={{ ml: { md: 'auto' } }}>
+                                <HistorySlider
+                                    days={days}
+                                    onChange={(d) => {
+                                        setDays(d);
+                                        fetchMergedPRsList({ fullReload: true, windowDays: d });
+                                    }}
+                                    disabled={loadingHistorical || processingRepos}
+                                />
+                            </Box>
                         </Box>
 
                         {selectedRepos.length === 0 && !processingRepos && (

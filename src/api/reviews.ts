@@ -1,5 +1,10 @@
 import { githubClient } from './githubClient';
 
+// A reviewer is a bot if GitHub types it as such, or its login is suffixed with
+// "[bot]" (e.g. copilot-pull-request-reviewer[bot], devin-ai-integration[bot]).
+const isBotUser = (login: string, type?: string): boolean =>
+    type === 'Bot' || login.endsWith('[bot]');
+
 export type ReviewState =
     | 'APPROVED'
     | 'CHANGES_REQUESTED'
@@ -11,6 +16,8 @@ interface Review {
     id: number;
     user: {
         login: string;
+        avatar_url: string;
+        type?: string;
     };
     state: ReviewState;
     submitted_at: string;
@@ -54,12 +61,14 @@ export interface ReviewerInfo {
     login: string;
     avatarUrl: string;
     state: ReviewState | 'PENDING';
+    isBot: boolean;
 }
 
 interface PRDetails {
     requested_reviewers: Array<{
         login: string;
         avatar_url: string;
+        type?: string;
     }>;
 }
 
@@ -75,7 +84,7 @@ export async function fetchPRDetails(
 
 export function computeAllReviewersState(
     reviews: Review[],
-    requestedReviewers: Array<{ login: string; avatar_url: string }>
+    requestedReviewers: Array<{ login: string; avatar_url: string; type?: string }>
 ): ReviewerInfo[] {
     const reviewerMap = new Map<string, ReviewerInfo>();
 
@@ -85,6 +94,7 @@ export function computeAllReviewersState(
             login: reviewer.login,
             avatarUrl: reviewer.avatar_url,
             state: 'PENDING',
+            isBot: isBotUser(reviewer.login, reviewer.type),
         });
     }
 
@@ -110,8 +120,11 @@ export function computeAllReviewersState(
 
         reviewerMap.set(key, {
             login: review.user.login,
-            avatarUrl: existing?.avatarUrl || '',
+            // Once a reviewer approves, GitHub drops them from requested_reviewers,
+            // so they only appear here — use the avatar from the review itself.
+            avatarUrl: existing?.avatarUrl || review.user.avatar_url || '',
             state,
+            isBot: existing?.isBot ?? isBotUser(review.user.login, review.user.type),
         });
     }
 

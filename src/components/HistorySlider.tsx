@@ -20,7 +20,7 @@ export const HistorySlider: React.FC<HistorySliderProps> = ({
     disabled = false,
 }) => {
     return (
-        <Box sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 2 }}>
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 <CalendarMonth fontSize="small" color="action" />
                 <Typography variant="body2" color="text.secondary" sx={{ whiteSpace: 'nowrap' }}>

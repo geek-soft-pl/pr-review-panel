@@ -56,7 +56,7 @@ export const TokenBar: React.FC<TokenBarProps> = ({
     const isValidToken = !!user && !userError;
 
     return (
-        <Box>
+        <Box sx={{ display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap', justifyContent: 'space-between' }}>
             <Box sx={{ display: 'flex', gap: 2, alignItems: 'flex-start', flexWrap: 'wrap' }}>
                 <TextField
                     type={showToken ? 'text' : 'password'}
@@ -108,8 +108,8 @@ export const TokenBar: React.FC<TokenBarProps> = ({
                 )}
             </Box>
 
-            {/* Token status */}
-            <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+            {/* Token status — sits to the right of the input row */}
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
                 {userLoading && (
                     <Typography variant="body2" color="text.secondary">
                         Verifying token...

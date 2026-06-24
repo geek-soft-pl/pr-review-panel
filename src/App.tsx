@@ -2,10 +2,9 @@ import { useEffect, useMemo, useState } from 'react';
 import { ThemeProvider, createTheme, CssBaseline, Container, Box, Paper, Typography, Switch } from '@mui/material';
 import { GitHub, LightMode, DarkMode } from '@mui/icons-material';
 import { TokenBar } from './components/TokenBar';
-import { HistorySlider } from './components/HistorySlider';
 import { Dashboard } from './pages/Dashboard';
 import { useToken, useCurrentUser } from './state/tokenStore';
-import { useHistoryWindow } from './state/configStore';
+import { sectionSurfaceSx } from './styles/sections';
 
 // Organization whose PRs the panel shows. Configure via VITE_GITHUB_ORG (.env);
 // falls back to the default below when unset.
@@ -50,7 +49,6 @@ const createAppTheme = (mode: ThemeMode) =>
 function App() {
   const { token, setToken, clearToken, storageType } = useToken();
   const { user, loading: userLoading, error: userError } = useCurrentUser(token);
-  const { days, setDays } = useHistoryWindow();
   const [themeMode, setThemeMode] = useState<ThemeMode>(getInitialThemeMode);
   const theme = useMemo(() => createAppTheme(themeMode), [themeMode]);
 
@@ -84,38 +82,31 @@ function App() {
           </Box>
         </Box>
 
-        {/* Configuration Panel */}
-        <Paper sx={{ p: 3, mb: 3 }} elevation={0} variant="outlined">
-          <Box sx={{ display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between' }}>
-            <Box sx={{ flex: 1, minWidth: 400 }}>
-              <TokenBar
-                token={token}
-                storageType={storageType}
-                user={user}
-                userLoading={userLoading}
-                userError={userError}
-                onSaveToken={setToken}
-                onClearToken={clearToken}
-              />
-            </Box>
-            {isAuthenticated && (
-              <Box>
-                <HistorySlider days={days} onChange={setDays} />
-              </Box>
-            )}
-          </Box>
-        </Paper>
-
-        {/* Dashboard */}
+        {/* Dashboard — kept at the top once signed in so the PR lists are
+            the first thing you see. */}
         {isAuthenticated && (
-          <Paper sx={{ p: 3 }} elevation={0} variant="outlined">
+          <Paper sx={[{ p: 3, mb: 3 }, sectionSurfaceSx(2)]} elevation={0}>
             <Dashboard
               userLogin={user!.login}
               org={ORGANIZATION}
-              historyDays={days}
             />
           </Paper>
         )}
+
+        {/* Configuration Panel — token/login status + history depth. Set once,
+            so it sits at the bottom when signed in; before sign-in it's the only
+            content and naturally appears at the top. */}
+        <Paper sx={[{ p: 3 }, sectionSurfaceSx(2)]} elevation={0}>
+          <TokenBar
+            token={token}
+            storageType={storageType}
+            user={user}
+            userLoading={userLoading}
+            userError={userError}
+            onSaveToken={setToken}
+            onClearToken={clearToken}
+          />
+        </Paper>
       </Container>
     </ThemeProvider>
   );

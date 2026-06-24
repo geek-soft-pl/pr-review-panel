@@ -19,7 +19,10 @@ import {
 } from '@mui/material';
 import { OpenInNew, VisibilityOff, Visibility, ThumbUp } from '@mui/icons-material';
 import { ReviewBadge } from './ReviewBadge';
+import { PRStatusBadge } from './PRStatusBadge';
 import type { ReviewState, ReviewerInfo } from '../api/reviews';
+import type { PRStatus } from '../api/pullStatus';
+import { sectionSurfaceSx, sectionBorderColor } from '../styles/sections';
 
 export interface PRItem {
     id: number;
@@ -35,6 +38,7 @@ export interface PRItem {
     reviewState?: ReviewState;
     reviewSubmittedAt?: string | null;
     reviewers?: ReviewerInfo[];
+    prStatus?: PRStatus;
 }
 
 interface PRTableProps {
@@ -43,12 +47,15 @@ interface PRTableProps {
     showMergedDate?: boolean;
     showReviewColumn?: boolean;
     showReviewersColumn?: boolean;
+    showStatusColumn?: boolean;
+    dimStatusColumn?: boolean;
+    showAuthorColumn?: boolean;
     onHide?: (id: number) => void;
     onUnhide?: (id: number) => void;
     onApprove?: (pr: PRItem) => void;
 }
 
-type SortField = 'updatedAt' | 'repoFullName' | 'author';
+type SortField = 'updatedAt' | 'repoFullName' | 'author' | 'number';
 type SortDirection = 'asc' | 'desc';
 
 export const PRTable: React.FC<PRTableProps> = ({
@@ -57,6 +64,9 @@ export const PRTable: React.FC<PRTableProps> = ({
     showMergedDate = false,
     showReviewColumn = true,
     showReviewersColumn = false,
+    showStatusColumn = false,
+    dimStatusColumn = false,
+    showAuthorColumn = true,
     onHide,
     onUnhide,
     onApprove,
@@ -86,6 +96,9 @@ export const PRTable: React.FC<PRTableProps> = ({
                 case 'author':
                     comparison = a.author.localeCompare(b.author);
                     break;
+                case 'number':
+                    comparison = a.number - b.number;
+                    break;
             }
             return sortDirection === 'asc' ? comparison : -comparison;
         });
@@ -111,16 +124,18 @@ export const PRTable: React.FC<PRTableProps> = ({
 
     if (loading) {
         return (
-            <TableContainer component={Paper} variant="outlined">
-                <Table size="small">
+            <TableContainer component={Paper} elevation={0} sx={sectionSurfaceSx(1)}>
+                <Table size="small" sx={(theme) => ({ '& .MuiTableCell-root': { borderBottomColor: sectionBorderColor(theme) } })}>
                     <TableHead>
                         <TableRow>
                             <TableCell>Repository</TableCell>
+                            <TableCell>#</TableCell>
                             <TableCell>Title</TableCell>
-                            <TableCell>Author</TableCell>
+                            {showAuthorColumn && <TableCell>Author</TableCell>}
                             <TableCell>Updated</TableCell>
                             {showReviewColumn && <TableCell>My Review</TableCell>}
                             {showReviewersColumn && <TableCell>Reviewers</TableCell>}
+                            {showStatusColumn && <TableCell>Status</TableCell>}
                             <TableCell>Link</TableCell>
                             {showActions && <TableCell>Actions</TableCell>}
                         </TableRow>
@@ -129,11 +144,13 @@ export const PRTable: React.FC<PRTableProps> = ({
                         {[1, 2, 3, 4, 5].map((i) => (
                             <TableRow key={i}>
                                 <TableCell><Skeleton width={120} /></TableCell>
+                                <TableCell><Skeleton width={50} /></TableCell>
                                 <TableCell><Skeleton width={200} /></TableCell>
-                                <TableCell><Skeleton width={100} /></TableCell>
+                                {showAuthorColumn && <TableCell><Skeleton width={100} /></TableCell>}
                                 <TableCell><Skeleton width={80} /></TableCell>
                                 {showReviewColumn && <TableCell><Skeleton width={100} /></TableCell>}
                                 {showReviewersColumn && <TableCell><Skeleton width={150} /></TableCell>}
+                                {showStatusColumn && <TableCell><Skeleton width={120} /></TableCell>}
                                 <TableCell><Skeleton width={40} /></TableCell>
                                 {showActions && <TableCell><Skeleton width={40} /></TableCell>}
                             </TableRow>
@@ -146,7 +163,7 @@ export const PRTable: React.FC<PRTableProps> = ({
 
     if (items.length === 0) {
         return (
-            <Paper variant="outlined" sx={{ p: 4, textAlign: 'center' }}>
+            <Paper elevation={0} sx={[{ p: 4, textAlign: 'center' }, sectionSurfaceSx(1)]}>
                 <Typography color="text.secondary">
                     No pull requests found.
                 </Typography>
@@ -155,8 +172,8 @@ export const PRTable: React.FC<PRTableProps> = ({
     }
 
     return (
-        <TableContainer component={Paper} variant="outlined">
-            <Table size="small">
+        <TableContainer component={Paper} elevation={0} sx={sectionSurfaceSx(1)}>
+            <Table size="small" sx={(theme) => ({ '& .MuiTableCell-root': { borderBottomColor: sectionBorderColor(theme) } })}>
                 <TableHead>
                     <TableRow>
                         <TableCell>
@@ -168,16 +185,27 @@ export const PRTable: React.FC<PRTableProps> = ({
                                 Repository
                             </TableSortLabel>
                         </TableCell>
-                        <TableCell>Title</TableCell>
                         <TableCell>
                             <TableSortLabel
-                                active={sortField === 'author'}
-                                direction={sortField === 'author' ? sortDirection : 'asc'}
-                                onClick={() => handleSort('author')}
+                                active={sortField === 'number'}
+                                direction={sortField === 'number' ? sortDirection : 'desc'}
+                                onClick={() => handleSort('number')}
                             >
-                                Author
+                                #
                             </TableSortLabel>
                         </TableCell>
+                        <TableCell>Title</TableCell>
+                        {showAuthorColumn && (
+                            <TableCell>
+                                <TableSortLabel
+                                    active={sortField === 'author'}
+                                    direction={sortField === 'author' ? sortDirection : 'asc'}
+                                    onClick={() => handleSort('author')}
+                                >
+                                    Author
+                                </TableSortLabel>
+                            </TableCell>
+                        )}
                         <TableCell>
                             <TableSortLabel
                                 active={sortField === 'updatedAt'}
@@ -189,6 +217,7 @@ export const PRTable: React.FC<PRTableProps> = ({
                         </TableCell>
                         {showReviewColumn && <TableCell>My Review</TableCell>}
                         {showReviewersColumn && <TableCell>Reviewers</TableCell>}
+                        {showStatusColumn && <TableCell sx={dimStatusColumn ? { opacity: 0.7 } : undefined}>Status</TableCell>}
                         <TableCell>Link</TableCell>
                         {showActions && <TableCell align="center">Actions</TableCell>}
                     </TableRow>
@@ -198,7 +227,11 @@ export const PRTable: React.FC<PRTableProps> = ({
                         <TableRow
                             key={pr.id}
                             hover
-                            sx={{ '&:last-child td, &:last-child th': { border: 0 } }}
+                            sx={{
+                                '&:last-child td, &:last-child th': { border: 0 },
+                                opacity: pr.prStatus?.isDraft ? 0.55 : 1,
+                                height: 40,
+                            }}
                         >
                             <TableCell>
                                 <Chip
@@ -207,6 +240,18 @@ export const PRTable: React.FC<PRTableProps> = ({
                                     variant="outlined"
                                     sx={{ fontFamily: 'monospace', fontSize: '0.75rem' }}
                                 />
+                            </TableCell>
+                            <TableCell>
+                                <Link
+                                    href={pr.htmlUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    underline="hover"
+                                    color="text.secondary"
+                                    sx={{ whiteSpace: 'nowrap', fontVariantNumeric: 'tabular-nums' }}
+                                >
+                                    #{pr.number}
+                                </Link>
                             </TableCell>
                             <TableCell>
                                 <Box sx={{ maxWidth: 350 }}>
@@ -226,17 +271,19 @@ export const PRTable: React.FC<PRTableProps> = ({
                                             underline="hover"
                                             color="inherit"
                                         >
-                                            #{pr.number} {pr.title}
+                                            {pr.title}
                                         </Link>
                                     </Typography>
                                 </Box>
                             </TableCell>
-                            <TableCell>
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                                    <Avatar src={pr.authorAvatar} sx={{ width: 20, height: 20 }} />
-                                    <Typography variant="body2">{pr.author}</Typography>
-                                </Box>
-                            </TableCell>
+                            {showAuthorColumn && (
+                                <TableCell>
+                                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                        <Avatar src={pr.authorAvatar} sx={{ width: 20, height: 20 }} />
+                                        <Typography variant="body2">{pr.author}</Typography>
+                                    </Box>
+                                </TableCell>
+                            )}
                             <TableCell>
                                 <Typography variant="body2" color="text.secondary">
                                     {formatDate(showMergedDate && pr.mergedAt ? pr.mergedAt : pr.updatedAt)}
@@ -310,6 +357,11 @@ export const PRTable: React.FC<PRTableProps> = ({
                                             </Typography>
                                         )}
                                     </Box>
+                                </TableCell>
+                            )}
+                            {showStatusColumn && (
+                                <TableCell sx={dimStatusColumn ? { opacity: 0.7 } : undefined}>
+                                    <PRStatusBadge status={pr.prStatus} />
                                 </TableCell>
                             )}
                             <TableCell>

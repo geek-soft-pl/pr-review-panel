@@ -22,3 +22,24 @@ export function useHistoryWindow() {
 
     return { days, setDays };
 }
+
+/**
+ * A boolean toggle persisted in localStorage so the user's choice survives a
+ * page refresh. Initialized synchronously (no setState-in-effect).
+ */
+export function usePersistedToggle(key: string, defaultValue = false) {
+    const [value, setValue] = useState<boolean>(() => {
+        const stored = localStorage.getItem(key);
+        return stored === null ? defaultValue : stored === 'true';
+    });
+
+    const set = useCallback(
+        (next: boolean) => {
+            setValue(next);
+            localStorage.setItem(key, String(next));
+        },
+        [key]
+    );
+
+    return [value, set] as const;
+}

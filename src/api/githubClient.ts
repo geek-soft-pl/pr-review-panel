@@ -129,6 +129,43 @@ class GitHubClient {
 
     return items.slice(0, maxItems);
   }
+
+  async graphql<T>(
+    query: string,
+    variables?: Record<string, unknown>
+  ): Promise<T> {
+    const response = await fetch('https://api.github.com/graphql', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        // merge-info-preview enables PullRequest.mergeStateStatus
+        Accept: 'application/vnd.github.merge-info-preview+json',
+        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+
+    if (!response.ok) {
+      // Reuse the REST error shaping (rate-limit detection, message parsing).
+      return this.handleResponse<T>(response);
+    }
+
+    const payload = (await response.json()) as {
+      data?: T;
+      errors?: Array<{ message: string }>;
+    };
+
+    if (payload.errors && payload.errors.length > 0) {
+      const error: GitHubError = {
+        status: response.status,
+        message: payload.errors.map((e) => e.message).join('; '),
+        isRateLimit: false,
+      };
+      throw error;
+    }
+
+    return payload.data as T;
+  }
 }
 
 export const githubClient = new GitHubClient();
