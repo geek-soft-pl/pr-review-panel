@@ -20,9 +20,14 @@ export async function fetchCurrentUser(): Promise<GitHubUser> {
     return githubClient.fetch<GitHubUser>('/user');
 }
 
-export async function fetchUserTeamsForOrg(org: string): Promise<GitHubTeam[]> {
+// Team slugs grouped by org (lowercased): team-review requests are queried
+// per-org with a `${org}/${slug}` qualifier, so a flat slug list would mix orgs.
+export async function fetchUserTeamsByOrg(): Promise<Record<string, string[]>> {
     const allTeams = await githubClient.fetchWithPagination<GitHubTeam>('/user/teams');
-    return allTeams.filter(
-        (team) => team.organization.login.toLowerCase() === org.toLowerCase()
-    );
+    const byOrg: Record<string, string[]> = {};
+    for (const team of allTeams) {
+        const org = team.organization.login.toLowerCase();
+        (byOrg[org] ??= []).push(team.slug);
+    }
+    return byOrg;
 }

@@ -103,7 +103,7 @@ async function searchPRs(query: string, maxItems: number = 200): Promise<ParsedP
 export async function searchOpenPRsForReview(
     orgs: string[],
     login: string,
-    teamSlugs: string[] = []
+    teamSlugsByOrg: Record<string, string[]> = {}
 ): Promise<ParsedPR[]> {
     const allPRs: ParsedPR[] = [];
     const seen = new Set<string>();
@@ -114,7 +114,9 @@ export async function searchOpenPRsForReview(
         const queryRequested = `is:pr is:open org:${org} review-requested:${login} archived:false`;
         // Query 2: PRs where I already submitted a review (but still open)
         const queryReviewed = `is:pr is:open org:${org} reviewed-by:${login} archived:false`;
-        // Query 3+: PRs where my teams are requested as reviewers
+        // Query 3+: PRs where my teams are requested as reviewers — only this
+        // org's team slugs (the ${org}/${slug} qualifier must not mix orgs)
+        const teamSlugs = teamSlugsByOrg[org.toLowerCase()] ?? [];
         const teamQueries = teamSlugs.map(
             (slug) => `is:pr is:open org:${org} team-review-requested:${org}/${slug} archived:false`
         );

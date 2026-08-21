@@ -21,9 +21,10 @@ directly from the GitHub REST API using a token you provide — there is no back
 
 ### Which token / scopes
 
-- **Fine-grained personal access token** (recommended): grant it access to the
-  relevant org/repos with **Pull requests: Read and write** and
-  **Contents: Read-only**.
+- **Fine-grained personal access token** (recommended): grant it access to
+  **every configured org's** repos with **Pull requests: Read and write** and
+  **Contents: Read-only**. If the panel lists several orgs, the token must
+  cover all of them — otherwise the unreachable org's PRs silently stay empty.
 - **Classic PAT**: the `repo` scope covers private repositories. `read:org` helps
   team-based review requests resolve correctly.
 
@@ -46,7 +47,7 @@ Configuration is optional — copy `.env.example` to `.env` to override defaults
 
 | Variable          | Purpose                                              | Default       |
 | ----------------- | ---------------------------------------------------- | ------------- |
-| `VITE_GITHUB_ORG` | Organization whose PRs the panel shows.              | `geek-soft-pl`|
+| `VITE_GITHUB_ORG` | Organization(s) whose PRs the panel shows — one name or a comma-separated list (e.g. `geek-soft-pl,integrationsgeeksoft`). | `geek-soft-pl`|
 
 > `VITE_*` variables are **baked into the built bundle**, so only put non-secret
 > values here. There is intentionally no token env var — every user supplies their
