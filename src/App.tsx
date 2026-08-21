@@ -6,9 +6,15 @@ import { Dashboard } from './pages/Dashboard';
 import { useToken, useCurrentUser } from './state/tokenStore';
 import { sectionSurfaceSx } from './styles/sections';
 
-// Organization whose PRs the panel shows. Configure via VITE_GITHUB_ORG (.env);
-// falls back to the default below when unset.
-const ORGANIZATION = import.meta.env.VITE_GITHUB_ORG || 'geek-soft-pl';
+// Organizations whose PRs the panel shows, as a comma-separated list.
+// Configure via VITE_GITHUB_ORG; falls back to the default when unset.
+const parseOrgs = (raw: string | undefined): string[] =>
+    (raw || 'geek-soft-pl')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+const ORGANIZATIONS = parseOrgs(import.meta.env.VITE_GITHUB_ORG);
 
 type ThemeMode = 'light' | 'dark';
 const THEME_MODE_STORAGE_KEY = 'github_pr_panel_theme_mode';
@@ -88,7 +94,7 @@ function App() {
           <Paper sx={[{ p: 3, mb: 3 }, sectionSurfaceSx(2)]} elevation={0}>
             <Dashboard
               userLogin={user!.login}
-              org={ORGANIZATION}
+              orgs={ORGANIZATIONS}
             />
           </Paper>
         )}

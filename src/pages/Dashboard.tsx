@@ -31,7 +31,7 @@ import type { ParsedPR } from '../api/search';
 import { fetchPRReviews, computeMyReviewState, submitReview, fetchPRDetails, computeAllReviewersState } from '../api/reviews';
 import type { ReviewStateInfo } from '../api/reviews';
 import { fetchTimeline, wasReviewRequestedForMe } from '../api/timeline';
-import { fetchUserTeamsForOrg } from '../api/user';
+import { fetchUserTeamsByOrg } from '../api/user';
 import type { GitHubError } from '../api/githubClient';
 import { useHiddenPRs } from '../state/hiddenStore';
 import { useHistoryWindow, usePersistedToggle } from '../state/configStore';
@@ -40,7 +40,7 @@ import { fetchPRStatuses, prStatusKey } from '../api/pullStatus';
 
 interface DashboardProps {
     userLogin: string;
-    org: string;
+    orgs: string[];
 }
 
 interface TabPanelProps {
@@ -102,8 +102,8 @@ const timelineCache = new Map<string, { data: boolean; timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const SELECTED_REPOS_STORAGE_KEY_PREFIX = 'github_pr_panel_selected_repos';
 
-const getSelectedReposStorageKey = (org: string, userLogin: string) =>
-    `${SELECTED_REPOS_STORAGE_KEY_PREFIX}:${org}:${userLogin.toLowerCase()}`;
+const getSelectedReposStorageKey = (orgs: string[], userLogin: string) =>
+    `${SELECTED_REPOS_STORAGE_KEY_PREFIX}:${orgs.join(',')}:${userLogin.toLowerCase()}`;
 
 const loadSelectedRepos = (storageKey: string): string[] => {
     const raw = localStorage.getItem(storageKey);
@@ -127,7 +127,7 @@ const formatTime = (date: Date) => {
 
 export const Dashboard: React.FC<DashboardProps> = ({
     userLogin,
-    org,
+    orgs,
 }) => {
     const [tabValue, setTabValue] = useState(0);
     const [myOpenPRs, setMyOpenPRs] = useState<PRItem[]>([]);
@@ -161,7 +161,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const [processingRepos, setProcessingRepos] = useState(false);
     const [latestMergedFetchTime, setLatestMergedFetchTime] = useState<Date | null>(null);
 
-    const [teamSlugs, setTeamSlugs] = useState<string[]>([]);
+    const [teamsByOrg, setTeamsByOrg] = useState<Record<string, string[]>>({});
     const [teamsLoaded, setTeamsLoaded] = useState(false);
 
     const { hidePR, unhidePR, isHidden } = useHiddenPRs();
@@ -172,16 +172,16 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const myOpenReqId = useRef(0);
     const openReqId = useRef(0);
     const selectedReposStorageKey = useMemo(
-        () => getSelectedReposStorageKey(org, userLogin),
-        [org, userLogin]
+        () => getSelectedReposStorageKey(orgs, userLogin),
+        [orgs, userLogin]
     );
 
-    // Get unique repos from merged PRs
+    // Get unique repos from merged PRs. Full "owner/repo" names — with
+    // multiple orgs configured, bare repo names would collide across orgs.
     const availableRepos = useMemo(() => {
         const repos = new Set<string>();
         allMergedPRs.forEach(pr => {
-            const repoName = pr.repoFullName.split('/')[1] || pr.repoFullName;
-            repos.add(repoName);
+            repos.add(pr.repoFullName);
         });
         return Array.from(repos).sort();
     }, [allMergedPRs]);
@@ -273,15 +273,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
         timelineCache.clear();
     }, [userLogin]);
 
-    // Fetch the user's teams in the org on mount. The initial PR fetch is gated
+    // Fetch the user's teams across all orgs on mount. The initial PR fetch is gated
     // on this (see the auto-fetch effect) so "To Review" is queried once, already
     // knowing the team slugs — instead of firing with no teams and again on load.
     useEffect(() => {
         let active = true;
-        fetchUserTeamsForOrg(org)
-            .then((teams) => {
+        fetchUserTeamsByOrg()
+            .then((byOrg) => {
                 if (!active) return;
-                setTeamSlugs(teams.map((t) => t.slug));
+                setTeamsByOrg(byOrg);
                 setTeamsLoaded(true);
             })
             .catch((err) => {
@@ -291,7 +291,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return () => {
             active = false;
         };
-    }, [org]);
+    }, [orgs]);
 
     const fetchReviewState = useCallback(
         async (pr: ParsedPR, queue: RequestQueue): Promise<ReviewStateInfo> => {
@@ -322,11 +322,13 @@ export const Dashboard: React.FC<DashboardProps> = ({
             const events = await queue.add(() =>
                 fetchTimeline(pr.owner, pr.repo, pr.number)
             );
-            const wasRequested = wasReviewRequestedForMe(events, userLogin, teamSlugs);
+            // Check only the teams of the PR's own org.
+            const orgTeams = teamsByOrg[pr.owner.toLowerCase()] ?? [];
+            const wasRequested = wasReviewRequestedForMe(events, userLogin, orgTeams);
             timelineCache.set(cacheKey, { data: wasRequested, timestamp: Date.now() });
             return wasRequested;
         },
-        [userLogin, teamSlugs]
+        [userLogin, teamsByOrg]
     );
 
     // Fetch my open PRs (authored by me)
@@ -339,7 +341,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         const queue = new RequestQueue(5);
 
         try {
-            const myPRsRaw = await searchMyOpenPRs([org], userLogin);
+            const myPRsRaw = await searchMyOpenPRs(orgs, userLogin);
             setProgressMyOpen(30);
 
             const myPRsFormatted: PRItem[] = [];
@@ -405,7 +407,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         } finally {
             if (reqId === myOpenReqId.current) setLoadingMyOpen(false);
         }
-    }, [org, userLogin]);
+    }, [orgs, userLogin]);
 
     // Fetch open PRs
     const fetchOpenPRs = useCallback(async () => {
@@ -417,7 +419,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         const queue = new RequestQueue(5);
 
         try {
-            const openPRsRaw = await searchOpenPRsForReview([org], userLogin, teamSlugs);
+            const openPRsRaw = await searchOpenPRsForReview(orgs, userLogin, teamsByOrg);
             setProgressOpen(30);
 
             const openPRsWithReviews: PRItem[] = [];
@@ -467,7 +469,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         } finally {
             if (reqId === openReqId.current) setLoadingOpen(false);
         }
-    }, [org, userLogin, teamSlugs, fetchReviewState]);
+    }, [orgs, userLogin, teamsByOrg, fetchReviewState]);
 
     // Step 1: Fetch merged PRs list (fast, no per-PR requests)
     const fetchMergedPRsList = useCallback(async (opts?: { fullReload?: boolean; windowDays?: number }) => {
@@ -484,7 +486,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 since = latestMergedFetchTime;
             }
 
-            const mergedPRsRaw = await searchMergedPRs([org], since);
+            const mergedPRsRaw = await searchMergedPRs(orgs, since);
 
             if (since instanceof Date) {
                 // Delta update: append new PRs, updating duplicates
@@ -509,7 +511,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         } finally {
             setLoadingHistorical(false);
         }
-    }, [org, days, historicalLoaded, latestMergedFetchTime]);
+    }, [orgs, days, historicalLoaded, latestMergedFetchTime]);
 
     // Step 2: Process selected repos (per-PR requests only for selected repos)
     const processSelectedRepos = useCallback(async () => {
@@ -523,11 +525,10 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         const queue = new RequestQueue(5);
 
-        // Filter to selected repos only
-        const filteredPRs = allMergedPRs.filter(pr => {
-            const repoName = pr.repoFullName.split('/')[1] || pr.repoFullName;
-            return selectedRepos.includes(repoName);
-        });
+        // Filter to selected repos only (selections are full "owner/repo" names)
+        const filteredPRs = allMergedPRs.filter(pr =>
+            selectedRepos.includes(pr.repoFullName)
+        );
 
         const historicalFiltered: PRItem[] = [];
         const totalFiltered = filteredPRs.length;
@@ -679,7 +680,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 }}
             >
                 <Typography variant="h6">
-                    Pull Requests for <strong>@{userLogin}</strong> in <code>{org}</code>
+                    Pull Requests for <strong>@{userLogin}</strong> in <code>{orgs.join(', ')}</code>
                 </Typography>
                 <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
                     {((tabValue === 0 && myOpenRefreshTime) || (tabValue === 1 && openRefreshTime) || (tabValue === 2 && historicalRefreshTime)) && (
