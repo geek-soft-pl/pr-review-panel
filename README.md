@@ -53,6 +53,12 @@ Configuration is optional — copy `.env.example` to `.env` to override defaults
 > values here. There is intentionally no token env var — every user supplies their
 > own token in the UI.
 
+For GitHub Actions deployments, configure the repository variable
+`VITE_GITHUB_ORG` under **Settings → Secrets and variables → Actions → Variables**.
+Its value is a comma-separated list, for example
+`geek-soft-pl,integrationsgeeksoft`. The deploy workflow passes this variable to
+Vite during the production build and fails early if the variable is missing.
+
 ## Build & deploy
 
 ```bash

@@ -28,6 +28,9 @@ env:
   S3_BUCKET: geeksoft-dev-utils
   S3_PREFIX: pr
   CF_DISTRIBUTION_ID: E1E3RH6P0D1Y7G
+  # Repository variable configured in Settings > Secrets and variables > Actions.
+  # Vite bakes this non-secret, comma-separated organization list into the bundle.
+  VITE_GITHUB_ORG: ${{ vars.VITE_GITHUB_ORG }}
 
 jobs:
   deploy:
@@ -42,6 +45,12 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Validate deployment configuration
+        if: env.VITE_GITHUB_ORG == ''
+        run: |
+          echo "Missing repository variable: VITE_GITHUB_ORG" >&2
+          exit 1
 
       - name: Build
         run: npm run build
