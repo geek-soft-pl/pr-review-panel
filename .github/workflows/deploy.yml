@@ -24,7 +24,7 @@ concurrency:
 
 env:
   AWS_REGION: eu-central-1
-  AWS_ROLE: arn:aws:iam::337964480073:role/OIDC-github
+  AWS_DEPLOY_ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
   S3_BUCKET: geeksoft-dev-utils
   S3_PREFIX: pr
   CF_DISTRIBUTION_ID: E1E3RH6P0D1Y7G
@@ -47,10 +47,13 @@ jobs:
         run: npm ci
 
       - name: Validate deployment configuration
-        if: env.VITE_GITHUB_ORG == ''
         run: |
-          echo "Missing repository variable: VITE_GITHUB_ORG" >&2
-          exit 1
+          for name in AWS_DEPLOY_ROLE_ARN VITE_GITHUB_ORG; do
+            if [[ -z "${!name//[[:space:]]/}" ]]; then
+              echo "::error title=Deploy misconfigured::$name is not set in Settings > Secrets and variables > Actions > Variables."
+              exit 1
+            fi
+          done
 
       - name: Build
         run: npm run build
@@ -58,7 +61,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ env.AWS_ROLE }}
+          role-to-assume: ${{ env.AWS_DEPLOY_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Sync build to S3

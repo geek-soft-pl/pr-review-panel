@@ -57,7 +57,12 @@ For GitHub Actions deployments, configure the repository variable
 `VITE_GITHUB_ORG` under **Settings → Secrets and variables → Actions → Variables**.
 Its value is a comma-separated list, for example
 `geek-soft-pl,integrationsgeeksoft`. The deploy workflow passes this variable to
-Vite during the production build and fails early if the variable is missing.
+Vite during the production build.
+
+The deployment also requires `AWS_DEPLOY_ROLE_ARN`, set to the
+`pr_review_panel_deploy_role_arn` output from the `03-workload-dev` stack in
+`geeksoft_org_aws`. The workflow fails before building if either repository
+variable is missing.
 
 ## Build & deploy
 
