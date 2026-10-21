@@ -15,7 +15,7 @@ directly from the GitHub REST API using a token you provide — there is no back
 
 ## Prerequisites
 
-- Node.js 20+ and npm.
+- Node.js 24 (see `.nvmrc`) and npm.
 - A **GitHub token** with read access to the organization's pull requests
   (and `write` if you want to approve PRs from the panel).
 
@@ -81,14 +81,28 @@ npm run preview      # serve the build locally for a final check
 | Script            | What it does                                  |
 | ----------------- | --------------------------------------------- |
 | `npm run dev`     | Vite dev server with HMR.                     |
+| `npm test`        | API scheduling and rate-limit regression tests. |
 | `npm run build`   | Type-check and produce a production build.    |
 | `npm run preview` | Preview the production build (respects base). |
 | `npm run lint`    | Run ESLint over the project.                  |
 
+For React/browser regression checks, run `npm run dev` and open
+`/pr/tests/browser-regressions.html` on the printed local URL. This page uses
+simulated responses to check token changes, lazy history loading and cooldown
+messages without sending requests to GitHub.
+
 ## How it works (notes for maintainers)
 
-- `src/api/` — thin wrappers over the GitHub REST API. `githubClient` is a singleton
-  that holds the token, paginates, and transparently retries on secondary rate limits.
+- `src/api/` — wrappers over the GitHub REST and GraphQL APIs. `githubClient`
+  serializes requests, spaces searches by at least 2.5 seconds, and shares identical
+  pending GETs across the panel's tabs. A secondary rate limit pauses the whole
+  queue for at least 60 seconds, honoring longer `Retry-After` values and backing
+  off exponentially for up to two retries. Persistent throttling stops the pending
+  batch; a fresh request after the cooldown can try again. Consecutive failures
+  retain the backoff (capped at 15 minutes) until a request succeeds. Primary quota exhaustion is reported
+  immediately; subsequent requests wait for its reset. The panel shows when
+  requests can resume. Queued work from a previous token is discarded on sign-out
+  or token changes.
 - `src/state/` — small hooks backed by `localStorage`/`sessionStorage`
   (token, theme, hidden PRs, history window).
 - `src/pages/Dashboard.tsx` — orchestrates the three tabs, throttles per-PR requests
@@ -98,3 +112,6 @@ npm run preview      # serve the build locally for a final check
 GitHub's **Search API** is rate-limited separately and only exposes the first 1000
 results per query, so the panel scopes queries by org and, for the history tab, asks
 you to pick the repos to check before doing per-PR lookups.
+**Missing Approve** does not fetch at startup or during the 30-minute auto-refresh:
+its merged PR list loads on entering the tab, and review history loads only when
+you click **Load Reviews**.

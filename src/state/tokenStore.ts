@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { githubClient } from '../api/githubClient';
+import { useState, useEffect, useCallback, useRef } from 'react';
+import { githubClient, getGitHubErrorMessage } from '../api/githubClient';
 import { fetchCurrentUser } from '../api/user';
 import type { GitHubUser } from '../api/user';
 
@@ -66,11 +66,15 @@ export function useCurrentUser(token: string) {
     const [user, setUser] = useState<GitHubUser | null>(null);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    const requestGeneration = useRef(0);
 
     const fetchUser = useCallback(async () => {
+        const generation = ++requestGeneration.current;
+        const isCurrent = () => generation === requestGeneration.current && githubClient.getToken() === token;
         if (!token) {
             setUser(null);
             setError(null);
+            setLoading(false);
             return;
         }
 
@@ -81,6 +85,7 @@ export function useCurrentUser(token: string) {
                 const parsedUser = JSON.parse(cached);
                 setUser(parsedUser);
                 setError(null);
+                setLoading(false);
                 return;
             } catch {
                 // Invalid cache, continue to fetch
@@ -92,25 +97,21 @@ export function useCurrentUser(token: string) {
 
         try {
             const userData = await fetchCurrentUser();
+            if (!isCurrent()) return;
             setUser(userData);
             sessionStorage.setItem(USER_CACHE_KEY, JSON.stringify(userData));
         } catch (err) {
-            const errorObj = err as { status?: number; message?: string };
-            if (errorObj.status === 401) {
-                setError('Invalid or expired token');
-            } else if (errorObj.status === 403) {
-                setError('Token lacks permissions or rate limited');
-            } else {
-                setError(errorObj.message || 'Failed to fetch user');
-            }
+            if (!isCurrent()) return;
+            setError(getGitHubErrorMessage(err));
             setUser(null);
         } finally {
-            setLoading(false);
+            if (isCurrent()) setLoading(false);
         }
     }, [token]);
 
     useEffect(() => {
         fetchUser();
+        return () => { requestGeneration.current += 1; };
     }, [fetchUser]);
 
     return { user, loading, error, refetch: fetchUser };
