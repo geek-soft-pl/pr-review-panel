@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo, useSyncExternalStore } from 'react';
 import {
     Box,
     Tabs,
@@ -32,7 +32,7 @@ import { fetchPRReviews, computeMyReviewState, submitReview, fetchPRDetails, com
 import type { ReviewStateInfo } from '../api/reviews';
 import { fetchTimeline, wasReviewRequestedForMe } from '../api/timeline';
 import { fetchUserTeamsByOrg } from '../api/user';
-import type { GitHubError } from '../api/githubClient';
+import { githubClient, getGitHubErrorMessage } from '../api/githubClient';
 import { useHiddenPRs } from '../state/hiddenStore';
 import { useHistoryWindow, usePersistedToggle } from '../state/configStore';
 import { HistorySlider } from '../components/HistorySlider';
@@ -129,6 +129,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     userLogin,
     orgs,
 }) => {
+    const rateLimit = useSyncExternalStore(githubClient.subscribeToRateLimit, githubClient.getRateLimit);
     const [tabValue, setTabValue] = useState(0);
     const [myOpenPRs, setMyOpenPRs] = useState<PRItem[]>([]);
     const [openPRs, setOpenPRs] = useState<PRItem[]>([]);
@@ -605,16 +606,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     };
 
     const handleError = (err: unknown) => {
-        const error = err as GitHubError;
-        if (error.isRateLimit && error.rateLimitReset) {
-            setError(`Rate limit exceeded. Resets at ${error.rateLimitReset.toLocaleTimeString()}`);
-        } else if (error.status === 401) {
-            setError('Invalid or expired token. Please update your GitHub token.');
-        } else if (error.status === 403) {
-            setError('Token lacks permissions or access to this organization.');
-        } else {
-            setError(error.message || 'An error occurred while fetching data.');
-        }
+        setError(getGitHubErrorMessage(err));
     };
 
     // Auto-fetch on mount (once teams resolve) and every 30 minutes. Gating on
@@ -631,7 +623,8 @@ export const Dashboard: React.FC<DashboardProps> = ({
         return () => clearInterval(intervalId);
     }, [teamsLoaded, fetchMyOpenPRs, fetchOpenPRs]);
 
-    // Lazy load merged PRs list when tab is switched
+    // Missing Approve stays out of the initial/periodic fetch. Its merged PR
+    // search starts only on tab entry; per-PR history needs "Load Reviews".
     const handleTabChange = (_: React.SyntheticEvent, newValue: number) => {
         setTabValue(newValue);
         if (newValue === 2 && !historicalLoaded && !loadingHistorical) {
@@ -731,7 +724,12 @@ export const Dashboard: React.FC<DashboardProps> = ({
             )}
 
             {/* Error display */}
-            {error && (
+            {rateLimit && (
+                <Alert severity="warning" sx={{ mb: 2 }}>
+                    {getGitHubErrorMessage(rateLimit)}
+                </Alert>
+            )}
+            {error && !rateLimit && (
                 <Alert severity="error" sx={{ mb: 2 }} onClose={() => setError(null)}>
                     {error}
                 </Alert>

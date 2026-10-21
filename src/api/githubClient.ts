@@ -3,6 +3,8 @@ export interface GitHubError {
   message: string;
   isRateLimit: boolean;
   rateLimitReset?: Date;
+  rateLimitKind?: 'primary' | 'secondary';
+  retryAt?: Date;
 }
 
 export interface FetchOptions {
@@ -11,51 +13,193 @@ export interface FetchOptions {
   headers?: Record<string, string>;
 }
 
+export function getGitHubErrorMessage(err: unknown): string {
+  const error = err as Partial<GitHubError> | null;
+  if (error?.isRateLimit) {
+    const retryAt = error.retryAt ?? error.rateLimitReset;
+    const resume = retryAt
+      ? ` Requests can resume after ${retryAt.toLocaleTimeString()}.`
+      : ' Please wait a few minutes before trying again.';
+    return error.rateLimitKind === 'secondary'
+      ? `GitHub temporarily limited requests.${resume}`
+      : `GitHub API rate limit exceeded.${resume}`;
+  }
+  if (error?.status === 401) return 'Invalid or expired token. Please update your GitHub token.';
+  if (error?.status === 403) return 'Token lacks permissions or access to this organization.';
+  return error?.message || 'An error occurred while fetching data.';
+}
+
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+const SEARCH_INTERVAL_MS = 2_500;
+const SECONDARY_BACKOFF_MS = 60_000;
+
+interface RequestSession {
+  queue: Promise<void>;
+  inFlight: Map<string, Promise<unknown>>;
+  nextSearchAt: number;
+  blockedUntil: number;
+  secondaryFailures: number;
+  failedBatch?: GitHubError;
+}
+
+const createSession = (): RequestSession => ({
+  queue: Promise.resolve(),
+  inFlight: new Map(),
+  nextSearchAt: 0,
+  blockedUntil: 0,
+  secondaryFailures: 0,
+});
+
+function parseReset(value: string | null): Date | undefined {
+  if (!value?.trim()) return undefined;
+  const seconds = Number(value);
+  const date = new Date(seconds * 1000);
+  return Number.isFinite(seconds) && seconds > 0 && Number.isFinite(date.getTime())
+    ? date : undefined;
+}
+
+function parseRetryAfter(value: string | null): number | undefined {
+  if (!value?.trim()) return undefined;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds)) {
+    const milliseconds = seconds * 1000;
+    return seconds >= 0 && Number.isFinite(new Date(Date.now() + milliseconds).getTime())
+      ? milliseconds : undefined;
+  }
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - Date.now()) : undefined;
+}
 
 class GitHubClient {
   private token: string = '';
+  private session = createSession();
+  private rateLimit: GitHubError | null = null;
+  private listeners = new Set<() => void>();
 
   setToken(token: string) {
+    if (token === this.token) return;
     this.token = token;
+    // Requests captured under the old token must not run or populate the new
+    // account's UI. A new queue also avoids inheriting another account's wait.
+    this.session = createSession();
+    this.setRateLimit(null);
   }
 
   getToken(): string {
     return this.token;
   }
 
-  private async handleResponse<T>(response: Response): Promise<T> {
-    if (!response.ok) {
-      const isRateLimit =
-        response.status === 403 &&
-        response.headers.get('X-RateLimit-Remaining') === '0';
+  getRateLimit = (): GitHubError | null => this.rateLimit;
 
-      const rateLimitReset = response.headers.get('X-RateLimit-Reset');
-      const resetDate = rateLimitReset
-        ? new Date(parseInt(rateLimitReset, 10) * 1000)
-        : undefined;
+  subscribeToRateLimit = (listener: () => void): (() => void) => {
+    this.listeners.add(listener);
+    return () => { this.listeners.delete(listener); };
+  };
 
-      let message = `GitHub API error: ${response.status}`;
-      try {
-        const errorBody = await response.json();
-        message = errorBody.message || message;
-      } catch {
-        // ignore json parse errors
-      }
-
-      const error: GitHubError = {
-        status: response.status,
-        message,
-        isRateLimit,
-        rateLimitReset: resetDate,
-      };
-      throw error;
-    }
-
-    return response.json();
+  private setRateLimit(error: GitHubError | null) {
+    if (this.rateLimit === error) return;
+    this.rateLimit = error;
+    this.listeners.forEach((listener) => listener());
   }
 
-  async fetch<T>(
+  private assertSession(session: RequestSession) {
+    if (session !== this.session) {
+      throw {
+        status: 0,
+        message: 'GitHub account changed. Please refresh the panel.',
+        isRateLimit: false,
+      } satisfies GitHubError;
+    }
+  }
+
+  private async waitForTurn(session: RequestSession, isSearch: boolean) {
+    while (true) {
+      this.assertSession(session);
+      if (session.failedBatch) {
+        if (Date.now() < session.blockedUntil) throw session.failedBatch;
+        session.failedBatch = undefined;
+      }
+      const waitMs = Math.max(session.blockedUntil, isSearch ? session.nextSearchAt : 0) - Date.now();
+      if (waitMs <= 0) {
+        this.setRateLimit(null);
+        return;
+      }
+      // Chunk long waits so a very distant reset cannot overflow setTimeout.
+      await sleep(Math.min(waitMs, 60_000));
+    }
+  }
+
+  private async readError(response: Response, attempt: number): Promise<GitHubError> {
+    let message = `GitHub API error: ${response.status}`;
+    try {
+      const body = await response.json() as { message?: unknown } | null;
+      if (typeof body?.message === 'string') message = body.message;
+    } catch {
+      // Proxy/server errors may not contain JSON.
+    }
+
+    const retryAfter = response.headers.get('Retry-After');
+    const rateLimitStatus = response.status === 403 || response.status === 429;
+    const primary = rateLimitStatus && response.headers.get('X-RateLimit-Remaining') === '0';
+    const secondary = rateLimitStatus && !primary && (
+      response.status === 429 || retryAfter !== null || /rate limit|abuse detection/i.test(message)
+    );
+    const rateLimitReset = primary ? parseReset(response.headers.get('X-RateLimit-Reset')) : undefined;
+    const error: GitHubError = { status: response.status, message, isRateLimit: primary || secondary };
+
+    if (error.isRateLimit) {
+      error.rateLimitKind = primary ? 'primary' : 'secondary';
+      error.rateLimitReset = rateLimitReset;
+      const backoff = primary
+        ? (rateLimitReset ? Math.max(0, rateLimitReset.getTime() - Date.now()) : SECONDARY_BACKOFF_MS)
+        : Math.min(SECONDARY_BACKOFF_MS * 2 ** Math.min(attempt, 4), 15 * 60_000);
+      error.retryAt = new Date(Date.now() + Math.max(backoff, parseRetryAfter(retryAfter) ?? 0));
+    }
+    return error;
+  }
+
+  private async performRequest<T>(
+    session: RequestSession,
+    url: string,
+    options: RequestInit,
+    retriesLeft: number
+  ): Promise<T> {
+    const isSearch = new URL(url).pathname.startsWith('/search/');
+    while (true) {
+      await this.waitForTurn(session, isSearch);
+      this.assertSession(session);
+      if (isSearch) session.nextSearchAt = Date.now() + SEARCH_INTERVAL_MS;
+
+      const response = await fetch(url, options);
+      this.assertSession(session);
+      if (response.ok) {
+        const result = await response.json() as T;
+        this.assertSession(session);
+        session.secondaryFailures = 0;
+        return result;
+      }
+
+      const error = await this.readError(response, session.secondaryFailures);
+      this.assertSession(session);
+      if (error.isRateLimit) {
+        session.blockedUntil = Math.max(session.blockedUntil, error.retryAt!.getTime());
+        this.setRateLimit(error);
+        if (error.rateLimitKind === 'secondary') {
+          session.secondaryFailures++;
+          if (session.secondaryFailures <= retriesLeft) continue;
+          // Stop this batch once its shared retry budget is exhausted. A manual
+          // refresh after the cooldown may probe again, but only a successful
+          // response resets backoff; queued work cannot start new retry cycles.
+          session.failedBatch = error;
+        }
+      }
+      // Primary quota exhaustion is surfaced immediately. Any subsequent
+      // requests still respect the shared reset time before reaching GitHub.
+      throw error;
+    }
+  }
+
+  fetch<T>(
     endpoint: string,
     options: FetchOptions = {},
     retriesLeft: number = 2
@@ -67,6 +211,7 @@ class GitHubClient {
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
       'X-GitHub-Api-Version': '2022-11-28',
+      ...(options.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
       ...options.headers,
     };
 
@@ -74,34 +219,26 @@ class GitHubClient {
       headers.Authorization = `Bearer ${this.token}`;
     }
 
-    const response = await fetch(url, {
-      method: options.method || 'GET',
+    const session = this.session;
+    const method = (options.method || 'GET').toUpperCase();
+    const requestOptions: RequestInit = {
+      method,
       headers,
-      body: options.body ? JSON.stringify(options.body) : undefined,
-    });
-
-    // Transparently retry on secondary rate limits / abuse detection, which
-    // GitHub signals with 429 or a 403 carrying a Retry-After header. We do NOT
-    // retry primary quota exhaustion (X-RateLimit-Remaining: 0) — that can take
-    // up to an hour to reset and should surface to the user instead.
-    if (!response.ok && retriesLeft > 0) {
-      const remaining = response.headers.get('X-RateLimit-Remaining');
-      const retryAfter = response.headers.get('Retry-After');
-      const isSecondaryLimit =
-        response.status === 429 ||
-        (response.status === 403 && remaining !== '0' && retryAfter !== null);
-
-      if (isSecondaryLimit) {
-        const waitMs = retryAfter ? parseInt(retryAfter, 10) * 1000 : 1000;
-        // Only honor short, sensible backoffs; otherwise surface the error.
-        if (waitMs > 0 && waitMs <= 60_000) {
-          await sleep(waitMs);
-          return this.fetch<T>(endpoint, options, retriesLeft - 1);
-        }
-      }
+      body: options.body !== undefined ? JSON.stringify(options.body) : undefined,
+    };
+    const key = method === 'GET' ? JSON.stringify([url, [...new Headers(headers)], retriesLeft]) : undefined;
+    if (key) {
+      const pending = session.inFlight.get(key);
+      if (pending) return pending as Promise<T>;
     }
 
-    return this.handleResponse<T>(response);
+    const request = session.queue
+      .then(() => this.performRequest<T>(session, url, requestOptions, retriesLeft))
+      .finally(() => { if (key) session.inFlight.delete(key); });
+    // A rejected task must release the queue for subsequent work.
+    session.queue = request.then(() => {}, () => {});
+    if (key) session.inFlight.set(key, request);
+    return request;
   }
 
   async fetchWithPagination<T>(
@@ -134,30 +271,21 @@ class GitHubClient {
     query: string,
     variables?: Record<string, unknown>
   ): Promise<T> {
-    const response = await fetch('https://api.github.com/graphql', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        // merge-info-preview enables PullRequest.mergeStateStatus
-        Accept: 'application/vnd.github.merge-info-preview+json',
-        ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
-      },
-      body: JSON.stringify({ query, variables }),
-    });
-
-    if (!response.ok) {
-      // Reuse the REST error shaping (rate-limit detection, message parsing).
-      return this.handleResponse<T>(response);
-    }
-
-    const payload = (await response.json()) as {
+    const payload = await this.fetch<{
       data?: T;
       errors?: Array<{ message: string }>;
-    };
+    }>('/graphql', {
+      method: 'POST',
+      headers: {
+        // merge-info-preview enables PullRequest.mergeStateStatus
+        Accept: 'application/vnd.github.merge-info-preview+json',
+      },
+      body: { query, variables },
+    });
 
     if (payload.errors && payload.errors.length > 0) {
       const error: GitHubError = {
-        status: response.status,
+        status: 200,
         message: payload.errors.map((e) => e.message).join('; '),
         isRateLimit: false,
       };
