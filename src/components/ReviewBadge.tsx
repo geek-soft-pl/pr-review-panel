@@ -63,7 +63,7 @@ export const ReviewBadge: React.FC<ReviewBadgeProps> = ({ state, submittedAt }) 
     const config = getConfig();
     const tooltipText = submittedAt
         ? `Last action: ${formatDate(submittedAt)}`
-        : 'No review submitted';
+        : state === 'PENDING' ? 'Awaiting review' : 'No review submitted';
 
     return (
         <Tooltip title={tooltipText} arrow>

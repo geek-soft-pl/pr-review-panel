@@ -27,10 +27,10 @@ import FormControlLabel from '@mui/material/FormControlLabel';
 import { PRTable } from '../components/PRTable';
 import type { PRItem } from '../components/PRTable';
 import { searchOpenPRsForReview, searchMergedPRs, searchMyOpenPRs } from '../api/search';
-import type { ParsedPR } from '../api/search';
+import type { OpenReviewCandidate, ParsedPR } from '../api/search';
 import { fetchPRReviews, computeMyReviewState, submitReview, fetchPRDetails, computeAllReviewersState } from '../api/reviews';
 import type { ReviewStateInfo } from '../api/reviews';
-import { fetchTimeline, wasReviewRequestedForMe } from '../api/timeline';
+import { fetchTimeline, getOutstandingDirectReview, getReviewRequestSource, type ReviewRequestSource } from '../api/timeline';
 import { fetchUserTeamsByOrg } from '../api/user';
 import { githubClient, getGitHubErrorMessage } from '../api/githubClient';
 import { useHiddenPRs } from '../state/hiddenStore';
@@ -41,6 +41,13 @@ import { fetchPRStatuses, prStatusKey } from '../api/pullStatus';
 interface DashboardProps {
     userLogin: string;
     orgs: string[];
+}
+
+type HistoricalPR = PRItem & { requestSource: ReviewRequestSource };
+
+interface UserReviewHistory {
+    requestSource: ReviewRequestSource | null;
+    outstandingDirectReview: ReviewStateInfo | null;
 }
 
 interface TabPanelProps {
@@ -55,6 +62,19 @@ function TabPanel(props: TabPanelProps) {
         <div hidden={value !== index} {...other}>
             {value === index && <Box sx={{ pt: 2 }}>{children}</Box>}
         </div>
+    );
+}
+
+function OptionsRow({ children }: { children: React.ReactNode }) {
+    return (
+        <Box
+            role="group"
+            aria-label="Options"
+            sx={{ mt: 2, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}
+        >
+            <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 600 }}>Options:</Typography>
+            {children}
+        </Box>
     );
 }
 
@@ -98,8 +118,9 @@ class RequestQueue {
 
 // Cache for reviews and timeline
 const reviewCache = new Map<string, { data: ReviewStateInfo; timestamp: number }>();
-const timelineCache = new Map<string, { data: boolean; timestamp: number }>();
+const timelineCache = new Map<string, { data: UserReviewHistory; updatedAt: string; timestamp: number }>();
 const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const OPEN_REFRESH_INTERVAL = 30 * 60 * 1000;
 const SELECTED_REPOS_STORAGE_KEY_PREFIX = 'github_pr_panel_selected_repos';
 
 const getSelectedReposStorageKey = (orgs: string[], userLogin: string) =>
@@ -133,7 +154,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const [tabValue, setTabValue] = useState(0);
     const [myOpenPRs, setMyOpenPRs] = useState<PRItem[]>([]);
     const [openPRs, setOpenPRs] = useState<PRItem[]>([]);
-    const [historicalPRs, setHistoricalPRs] = useState<PRItem[]>([]);
+    const [historicalPRs, setHistoricalPRs] = useState<HistoricalPR[]>([]);
     const [loadingMyOpen, setLoadingMyOpen] = useState(false);
     const [loadingOpen, setLoadingOpen] = useState(false);
     const [loadingHistorical, setLoadingHistorical] = useState(false);
@@ -149,6 +170,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
     const [approveDialogOpen, setApproveDialogOpen] = useState(false);
     const [prToApprove, setPrToApprove] = useState<PRItem | null>(null);
     const [approving, setApproving] = useState(false);
+    const [onlyDirectRequests, setOnlyDirectRequests] = usePersistedToggle('github_pr_panel_only_direct_review_requests');
     const [hideApprovedOpen, setHideApprovedOpen] = usePersistedToggle('github_pr_panel_hide_approved_open');
     const [hideDraftsToReview, setHideDraftsToReview] = usePersistedToggle('github_pr_panel_hide_drafts_to_review');
     const [hideStatusToReview, setHideStatusToReview] = usePersistedToggle('github_pr_panel_hide_status_to_review');
@@ -193,6 +215,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         const hidden: PRItem[] = [];
 
         historicalPRs.forEach(pr => {
+            if (onlyDirectRequests && pr.requestSource !== 'direct') return;
             if (isHidden(pr.id)) {
                 hidden.push(pr);
             } else {
@@ -201,7 +224,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         });
 
         return { visiblePRs: visible, hiddenPRs: hidden };
-    }, [historicalPRs, isHidden]);
+    }, [historicalPRs, isHidden, onlyDirectRequests]);
 
     // Filter open PRs: optionally hide drafts and/or already-approved PRs.
     const filteredOpenPRs = useMemo(() => {
@@ -312,22 +335,26 @@ export const Dashboard: React.FC<DashboardProps> = ({
         [userLogin]
     );
 
-    const checkReviewRequested = useCallback(
-        async (pr: ParsedPR, queue: RequestQueue): Promise<boolean> => {
-            const cacheKey = `${pr.htmlUrl}/timeline`;
+    const fetchReviewHistory = useCallback(
+        async (pr: ParsedPR, queue: RequestQueue): Promise<UserReviewHistory> => {
+            const cacheKey = `${userLogin.toLowerCase()}/${pr.htmlUrl}/${pr.state}`;
             const cached = timelineCache.get(cacheKey);
-            if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
+            if (cached && cached.updatedAt === pr.updatedAt && Date.now() - cached.timestamp < CACHE_TTL) {
                 return cached.data;
             }
 
+            const open = pr.state === 'open';
+            // The latest review or removal can be on the last page of a long-running open PR.
             const events = await queue.add(() =>
-                fetchTimeline(pr.owner, pr.repo, pr.number)
+                fetchTimeline(pr.owner, pr.repo, pr.number, open ? Infinity : undefined)
             );
-            // Check only the teams of the PR's own org.
             const orgTeams = teamsByOrg[pr.owner.toLowerCase()] ?? [];
-            const wasRequested = wasReviewRequestedForMe(events, userLogin, orgTeams);
-            timelineCache.set(cacheKey, { data: wasRequested, timestamp: Date.now() });
-            return wasRequested;
+            const history = {
+                requestSource: getReviewRequestSource(events, userLogin, orgTeams, pr.mergedAt ?? pr.closedAt),
+                outstandingDirectReview: open ? getOutstandingDirectReview(events, userLogin) : null,
+            };
+            timelineCache.set(cacheKey, { data: history, updatedAt: pr.updatedAt, timestamp: Date.now() });
+            return history;
         },
         [userLogin, teamsByOrg]
     );
@@ -418,31 +445,42 @@ export const Dashboard: React.FC<DashboardProps> = ({
         setProgressOpen(0);
 
         const queue = new RequestQueue(5);
+        const getOpenReviewState = async (pr: OpenReviewCandidate): Promise<ReviewStateInfo | null> => {
+            if (!onlyDirectRequests) return fetchReviewState(pr, queue);
+            if (pr.fromDirectRequest) return { state: 'PENDING', submittedAt: null };
+            const history = await fetchReviewHistory(pr, queue);
+            return history.outstandingDirectReview;
+        };
 
         try {
-            const openPRsRaw = await searchOpenPRsForReview(orgs, userLogin, teamsByOrg);
+            const openPRsRaw = await searchOpenPRsForReview(orgs, userLogin, teamsByOrg, onlyDirectRequests);
+            if (reqId !== openReqId.current) return;
             setProgressOpen(30);
 
             const openPRsWithReviews: PRItem[] = [];
             for (let i = 0; i < openPRsRaw.length; i++) {
                 const pr = openPRsRaw[i];
                 try {
-                    const reviewState = await fetchReviewState(pr, queue);
-                    openPRsWithReviews.push({
-                        id: pr.id,
-                        number: pr.number,
-                        title: pr.title,
-                        author: pr.author,
-                        authorAvatar: pr.authorAvatar,
-                        repoFullName: pr.repoFullName,
-                        htmlUrl: pr.htmlUrl,
-                        updatedAt: pr.updatedAt,
-                        reviewState: reviewState.state,
-                        reviewSubmittedAt: reviewState.submittedAt,
-                    });
+                    const reviewState = await getOpenReviewState(pr);
+                    if (reviewState) {
+                        openPRsWithReviews.push({
+                            id: pr.id,
+                            number: pr.number,
+                            title: pr.title,
+                            author: pr.author,
+                            authorAvatar: pr.authorAvatar,
+                            repoFullName: pr.repoFullName,
+                            htmlUrl: pr.htmlUrl,
+                            updatedAt: pr.updatedAt,
+                            reviewState: reviewState.state,
+                            reviewSubmittedAt: reviewState.submittedAt,
+                        });
+                    }
                 } catch (err) {
                     console.error(`Error fetching reviews for ${pr.htmlUrl}:`, err);
+                    if (onlyDirectRequests && reqId === openReqId.current) handleError(err);
                 }
+                if (reqId !== openReqId.current) return;
                 setProgressOpen(30 + ((i + 1) / openPRsRaw.length) * 70);
             }
 
@@ -470,7 +508,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
         } finally {
             if (reqId === openReqId.current) setLoadingOpen(false);
         }
-    }, [orgs, userLogin, teamsByOrg, fetchReviewState]);
+    }, [orgs, userLogin, teamsByOrg, fetchReviewState, fetchReviewHistory, onlyDirectRequests]);
 
     // Step 1: Fetch merged PRs list (fast, no per-PR requests)
     const fetchMergedPRsList = useCallback(async (opts?: { fullReload?: boolean; windowDays?: number }) => {
@@ -531,15 +569,15 @@ export const Dashboard: React.FC<DashboardProps> = ({
             selectedRepos.includes(pr.repoFullName)
         );
 
-        const historicalFiltered: PRItem[] = [];
+        const historicalFiltered: HistoricalPR[] = [];
         const totalFiltered = filteredPRs.length;
 
         for (let i = 0; i < totalFiltered; i++) {
             const pr = filteredPRs[i];
 
             try {
-                const wasRequested = await checkReviewRequested(pr, queue);
-                if (!wasRequested) continue;
+                const { requestSource } = await fetchReviewHistory(pr, queue);
+                if (!requestSource) continue;
 
                 // Skip check for APPROVED state here to allow re-approving if needed,
                 // or keep it to only show missing approvals. 
@@ -548,6 +586,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                 if (reviewState.state === 'APPROVED') continue;
 
                 historicalFiltered.push({
+                    requestSource,
                     id: pr.id,
                     number: pr.number,
                     title: pr.title,
@@ -570,7 +609,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
 
         setHistoricalPRs(historicalFiltered);
         setProcessingRepos(false);
-    }, [allMergedPRs, selectedRepos, checkReviewRequested, fetchReviewState]);
+    }, [allMergedPRs, selectedRepos, fetchReviewHistory, fetchReviewState]);
 
     const handleApprove = (pr: PRItem) => {
         setPrToApprove(pr);
@@ -615,13 +654,24 @@ export const Dashboard: React.FC<DashboardProps> = ({
     useEffect(() => {
         if (!teamsLoaded) return;
         fetchMyOpenPRs();
-        fetchOpenPRs();
-        const intervalId = setInterval(() => {
-            fetchMyOpenPRs();
-            fetchOpenPRs();
-        }, 30 * 60 * 1000);
+        const intervalId = setInterval(fetchMyOpenPRs, OPEN_REFRESH_INTERVAL);
         return () => clearInterval(intervalId);
-    }, [teamsLoaded, fetchMyOpenPRs, fetchOpenPRs]);
+    }, [teamsLoaded, fetchMyOpenPRs]);
+
+    useEffect(() => {
+        if (!teamsLoaded) return;
+        fetchOpenPRs();
+        const intervalId = setInterval(fetchOpenPRs, OPEN_REFRESH_INTERVAL);
+        return () => clearInterval(intervalId);
+    }, [teamsLoaded, fetchOpenPRs]);
+
+    const changeDirectRequestsFilter = (checked: boolean) => {
+        // Discard the previous scope, including an in-flight refresh, before displaying the new one.
+        openReqId.current++;
+        setOpenPRs([]);
+        setOpenRefreshTime(null);
+        setOnlyDirectRequests(checked);
+    };
 
     // Missing Approve stays out of the initial/periodic fetch. Its merged PR
     // search starts only on tab entry; per-PR history needs "Load Reviews".
@@ -652,6 +702,19 @@ export const Dashboard: React.FC<DashboardProps> = ({
         tabValue === 0 ? loadingMyOpen
             : tabValue === 1 ? loadingOpen
                 : loadingHistorical || processingRepos;
+
+    const directRequestsOption = (
+        <FormControlLabel
+            control={
+                <Checkbox
+                    size="small"
+                    checked={onlyDirectRequests}
+                    onChange={(_, checked) => changeDirectRequestsFilter(checked)}
+                />
+            }
+            label={<Typography variant="body2" color="text.secondary">Only direct review requests</Typography>}
+        />
+    );
 
     return (
         <Box>
@@ -772,10 +835,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             <TabPanel value={tabValue} index={0}>
                 <PRTable items={filteredMyOpenPRs} loading={loadingMyOpen} showReviewColumn={false} showReviewersColumn={true} showStatusColumn showAuthorColumn={false} />
                 {!loadingMyOpen && myOpenPRs.length > 0 && (
-                    <Box sx={{ mt: 2, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 600 }}>
-                            Options:
-                        </Typography>
+                    <OptionsRow>
                         <FormControlLabel
                             control={
                                 <Checkbox
@@ -804,61 +864,61 @@ export const Dashboard: React.FC<DashboardProps> = ({
                                 </Typography>
                             }
                         />
-                    </Box>
+                    </OptionsRow>
                 )}
             </TabPanel>
 
             <TabPanel value={tabValue} index={1}>
                 <PRTable items={filteredOpenPRs} loading={loadingOpen} showStatusColumn={!hideStatusToReview} dimStatusColumn />
-                {!loadingOpen && openPRs.length > 0 && (
-                    <Box sx={{ mt: 2, display: 'flex', gap: 2, alignItems: 'center', flexWrap: 'wrap' }}>
-                        <Typography variant="body2" sx={{ color: 'text.primary', fontWeight: 600 }}>
-                            Options:
-                        </Typography>
-                        <FormControlLabel
-                            control={
-                                <Checkbox
-                                    checked={hideDraftsToReview}
-                                    onChange={(e) => setHideDraftsToReview(e.target.checked)}
-                                    size="small"
-                                />
-                            }
-                            label={
-                                <Typography variant="body2" color="text.secondary">
-                                    Hide drafts ({draftCountOpen})
-                                </Typography>
-                            }
-                        />
-                        <FormControlLabel
-                            control={
-                                <Checkbox
-                                    checked={hideApprovedOpen}
-                                    onChange={(e) => setHideApprovedOpen(e.target.checked)}
-                                    size="small"
-                                />
-                            }
-                            label={
-                                <Typography variant="body2" color="text.secondary">
-                                    Hide approved ({openPRs.filter(pr => pr.reviewState === 'APPROVED').length})
-                                </Typography>
-                            }
-                        />
-                        <FormControlLabel
-                            control={
-                                <Checkbox
-                                    checked={hideStatusToReview}
-                                    onChange={(e) => setHideStatusToReview(e.target.checked)}
-                                    size="small"
-                                />
-                            }
-                            label={
-                                <Typography variant="body2" color="text.secondary">
-                                    Hide status column
-                                </Typography>
-                            }
-                        />
-                    </Box>
-                )}
+                <OptionsRow>
+                    {directRequestsOption}
+                    {!loadingOpen && openPRs.length > 0 && (
+                        <>
+                            <FormControlLabel
+                                control={
+                                    <Checkbox
+                                        checked={hideDraftsToReview}
+                                        onChange={(e) => setHideDraftsToReview(e.target.checked)}
+                                        size="small"
+                                    />
+                                }
+                                label={
+                                    <Typography variant="body2" color="text.secondary">
+                                        Hide drafts ({draftCountOpen})
+                                    </Typography>
+                                }
+                            />
+                            <FormControlLabel
+                                control={
+                                    <Checkbox
+                                        checked={hideApprovedOpen}
+                                        onChange={(e) => setHideApprovedOpen(e.target.checked)}
+                                        size="small"
+                                    />
+                                }
+                                label={
+                                    <Typography variant="body2" color="text.secondary">
+                                        Hide approved ({openPRs.filter(pr => pr.reviewState === 'APPROVED').length})
+                                    </Typography>
+                                }
+                            />
+                            <FormControlLabel
+                                control={
+                                    <Checkbox
+                                        checked={hideStatusToReview}
+                                        onChange={(e) => setHideStatusToReview(e.target.checked)}
+                                        size="small"
+                                    />
+                                }
+                                label={
+                                    <Typography variant="body2" color="text.secondary">
+                                        Hide status column
+                                    </Typography>
+                                }
+                            />
+                        </>
+                    )}
+                </OptionsRow>
             </TabPanel>
 
             <TabPanel value={tabValue} index={2}>
@@ -897,7 +957,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                             <Button
                                 variant="outlined"
                                 onClick={processSelectedRepos}
-                                disabled={selectedRepos.length === 0 || processingRepos}
+                                disabled={!teamsLoaded || selectedRepos.length === 0 || processingRepos}
                                 size="small"
                             >
                                 Load Reviews ({selectedRepos.length} repos)
@@ -962,6 +1022,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
                         )}
                     </Box>
                 )}
+                <OptionsRow>{directRequestsOption}</OptionsRow>
             </TabPanel>
 
             <Dialog

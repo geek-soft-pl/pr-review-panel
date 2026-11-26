@@ -10,6 +10,13 @@ It surfaces the three things the stock GitHub UI makes awkward to track:
   requested from you but never got your approval. You can approve straight from the
   table, or hide PRs you don't care about.
 
+**Only direct review requests** is off by default and shared by both review tabs.
+Turn it on to see open PRs where someone requested your review directly. They stay
+in your queue after you comment or request changes, until you approve or the request
+is withdrawn. A new direct request reopens the review. In **Missing Approve**, the
+filter checks whether someone requested your review directly before merge.
+The panel remembers your choice in this browser.
+
 Built with React 19, TypeScript, Vite and MUI. All data is fetched client-side
 directly from the GitHub REST API using a token you provide — there is no backend.
 
@@ -81,7 +88,7 @@ npm run preview      # serve the build locally for a final check
 | Script            | What it does                                  |
 | ----------------- | --------------------------------------------- |
 | `npm run dev`     | Vite dev server with HMR.                     |
-| `npm test`        | API scheduling and rate-limit regression tests. |
+| `npm test`        | API scheduling, rate limits and review request filtering. |
 | `npm run build`   | Type-check and produce a production build.    |
 | `npm run preview` | Preview the production build (respects base). |
 | `npm run lint`    | Run ESLint over the project.                  |

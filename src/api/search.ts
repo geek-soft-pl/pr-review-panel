@@ -1,4 +1,4 @@
-import { githubClient } from './githubClient';
+import { githubClient } from './githubClient.ts';
 
 export interface SearchResult {
     total_count: number;
@@ -100,37 +100,35 @@ async function searchPRs(query: string, maxItems: number = 200): Promise<ParsedP
     return items.slice(0, maxItems).map(parseSearchItem);
 }
 
+export interface OpenReviewCandidate extends ParsedPR {
+    fromDirectRequest: boolean;
+}
+
 export async function searchOpenPRsForReview(
     orgs: string[],
     login: string,
-    teamSlugsByOrg: Record<string, string[]> = {}
-): Promise<ParsedPR[]> {
-    const allPRs: ParsedPR[] = [];
+    teamSlugsByOrg: Record<string, string[]> = {},
+    directOnly = false
+): Promise<OpenReviewCandidate[]> {
+    const allPRs: OpenReviewCandidate[] = [];
     const seen = new Set<string>();
     const normalizedLogin = login.toLowerCase();
+    const directQualifier = 'user-review-requested:@me';
 
     for (const org of orgs) {
-        // Query 1: PRs where I'm requested as reviewer (pending review)
-        const queryRequested = `is:pr is:open org:${org} review-requested:${login} archived:false`;
-        // Query 2: PRs where I already submitted a review (but still open)
-        const queryReviewed = `is:pr is:open org:${org} reviewed-by:${login} archived:false`;
-        // Query 3+: PRs where my teams are requested as reviewers — only this
-        // org's team slugs (the ${org}/${slug} qualifier must not mix orgs)
-        const teamSlugs = teamSlugsByOrg[org.toLowerCase()] ?? [];
-        const teamQueries = teamSlugs.map(
-            (slug) => `is:pr is:open org:${org} team-review-requested:${org}/${slug} archived:false`
-        );
+        const teamSlugs = directOnly ? [] : teamSlugsByOrg[org.toLowerCase()] ?? [];
+        // Keep pending requests first so a re-request takes precedence over an earlier review.
+        const qualifiers = [
+            directOnly ? directQualifier : `review-requested:${login}`,
+            `reviewed-by:${login}`,
+            ...teamSlugs.map(slug => `team-review-requested:${org}/${slug}`),
+        ];
+        const results = await Promise.all(qualifiers.map(async qualifier => {
+            const prs = await searchPRs(`is:pr is:open org:${org} ${qualifier} archived:false`);
+            return prs.map(pr => ({ ...pr, fromDirectRequest: qualifier === directQualifier }));
+        }));
 
-        // Run all queries in parallel
-        const [requestedPRs, reviewedPRs, ...teamResults] = await Promise.all([
-            searchPRs(queryRequested, 200),
-            searchPRs(queryReviewed, 200),
-            ...teamQueries.map((q) => searchPRs(q, 200)),
-        ]);
-
-        // Merge results, avoiding duplicates
-        const allResults = [...requestedPRs, ...reviewedPRs, ...teamResults.flat()];
-        for (const pr of allResults) {
+        for (const pr of results.flat()) {
             // "To Review" should never include my own PRs.
             if (pr.author.toLowerCase() === normalizedLogin) {
                 continue;
