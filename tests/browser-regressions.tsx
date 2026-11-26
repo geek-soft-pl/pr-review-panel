@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { Dashboard } from '../src/pages/Dashboard';
 import { githubClient } from '../src/api/githubClient';
 import { useCurrentUser } from '../src/state/tokenStore';
+import { searchItem } from './reviewFixtures';
 
 // Real React/DOM integration checks served by Vite, without a DOM emulator.
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -65,6 +66,98 @@ const cases: Array<[string, (root: ReturnType<typeof createRoot>) => Promise<voi
     await until(() => requests.some((url) => url.search.includes('is%3Amerged')));
     check(requests.filter((url) => url.search.includes('is%3Amerged')).length === 1, 'History was fetched more than once');
     check(!requests.some((url) => /timeline|reviews/.test(url.pathname)), 'Per-PR history fetched before Load Reviews');
+  }],
+  ['Only direct review requests is shared by the open queue and loaded history', async (root) => {
+    const directKey = 'github_pr_panel_only_direct_review_requests';
+    const approvedKey = 'github_pr_panel_hide_approved_open';
+    const reposKey = 'github_pr_panel_selected_repos:org:me';
+    const keys = [directKey, approvedKey, reposKey];
+    const saved = keys.map(key => localStorage.getItem(key));
+    const tab = async (name: string) => {
+      const button = [...host.querySelectorAll<HTMLElement>('[role="tab"]')].find(el => el.textContent?.includes(name))!;
+      await act(async () => { button.click(); });
+    };
+    const checkbox = () => [...host.querySelectorAll('label')]
+      .find(label => label.textContent === 'Only direct review requests')?.querySelector('input');
+    const row = (number: number) => host.querySelector(`tbody a[href$="/pull/${number}"]`)?.closest('tr');
+    const checkFilterPosition = () => {
+      const options = host.querySelector('[role="group"][aria-label="Options"]');
+      const table = host.querySelector('table')!;
+      check(options && options.querySelector('input[type="checkbox"]') === checkbox(), 'The direct filter should be the first option');
+      check(options!.getBoundingClientRect().top >= table.getBoundingClientRect().bottom, 'Options should appear below the table');
+    };
+    const before = '2026-11-01T09:00:00Z';
+    const merged = '2026-11-01T12:00:00Z';
+    let historyReads = 0;
+    let authorSearches = 0;
+    try {
+      localStorage.removeItem(directKey);
+      localStorage.setItem(approvedKey, 'true');
+      localStorage.setItem(reposKey, '["org/repo"]');
+      globalThis.fetch = async (input) => {
+        const url = new URL(String(input));
+        const query = url.searchParams.get('q') ?? '';
+        if (url.pathname === '/user/teams') return json([{ slug: 'frontend', organization: { login: 'org' } }]);
+        if (url.pathname === '/search/issues') {
+          if (query.includes('author:')) authorSearches++;
+          let numbers: number[] = [];
+          if (query.includes('is:merged')) numbers = [211, 212];
+          else if (query.includes('user-review-requested:@me')) numbers = [225];
+          else if (query.includes('review-requested:')) numbers = [225, 226];
+          else if (query.includes('reviewed-by:me')) numbers = [225, 226, 237, 238];
+          const items = numbers.map(n => searchItem(n, 'author', n < 225 ? merged : null));
+          return json({ items, total_count: items.length, incomplete_results: false });
+        }
+        if (url.pathname.endsWith('/timeline')) {
+          historyReads++;
+          const team = { event: 'review_requested', requested_team: { slug: 'frontend' }, created_at: before };
+          const direct = { event: 'review_requested', requested_reviewer: { login: 'me' }, created_at: before };
+          const comment = { event: 'reviewed', user: { login: 'me' }, state: 'commented', submitted_at: '2026-11-16T15:00:14Z' };
+          if (url.pathname.includes('/226/')) return json([team, comment]);
+          if (url.pathname.includes('/237/') || url.pathname.includes('/238/')) {
+            const state = url.pathname.includes('/237/') ? 'changes_requested' : 'approved';
+            return json([direct, { ...comment, state, submitted_at: '2026-11-02T07:05:49Z' }, comment]);
+          }
+          return json(url.pathname.includes('/211/') ? [team, direct] : [team]);
+        }
+        if (url.pathname.endsWith('/reviews')) {
+          return json(url.pathname.includes('/225/')
+            ? [{ user: { login: 'me' }, state: 'APPROVED', submitted_at: before }] : []);
+        }
+        if (url.pathname === '/graphql') return json({ data: {} });
+        throw new Error(`Unexpected fixture request: ${url.pathname}`);
+      };
+      await act(async () => { root.render(<Dashboard userLogin="me" orgs={['org']} />); });
+      await tab('To Review');
+      check(checkbox()?.checked === false, 'The personal filter should start unchecked');
+      await until(() => !!row(226));
+      checkFilterPosition();
+      await act(async () => { checkbox()!.click(); });
+      await until(() => !!row(225) && !row(226));
+      check(row(225)?.textContent?.includes('Pending'), 'A repeat request should be pending despite the previous approval');
+      check(row(237)?.textContent?.includes('Changes Requested'), 'A personal change request disappeared after a follow-up comment');
+      check(!row(238), 'A comment after personal approval reopened the review');
+      check(localStorage.getItem(directKey) === 'true', 'The filter should survive a reload');
+      check(authorSearches === 1, 'Changing review scope re-fetched authored PRs');
+
+      await tab('Missing Approve');
+      check(checkbox()?.checked, 'History did not inherit the filter');
+      await until(() => host.textContent!.includes('2 merged PRs'));
+      const load = [...host.querySelectorAll('button')].find(button => button.textContent?.includes('Load Reviews'))!;
+      const historyReadsBeforeLoad = historyReads;
+      await act(async () => { load.click(); });
+      await until(() => !!row(211));
+      checkFilterPosition();
+      check(!row(212), 'The team-only request appeared as a personal missing approval');
+      await act(async () => { checkbox()!.click(); });
+      check(row(212) && row(211), 'Toggling the filter did not restore already loaded team requests');
+      check(historyReads === historyReadsBeforeLoad + 2, 'Toggling the filter re-fetched PR timelines');
+    } finally {
+      keys.forEach((key, i) => {
+        if (saved[i] === null) localStorage.removeItem(key);
+        else localStorage.setItem(key, saved[i]!);
+      });
+    }
   }],
   ['The current cooldown remains visible after an earlier request failed', async (root) => {
     globalThis.fetch = async (input) => {
