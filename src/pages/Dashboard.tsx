@@ -30,7 +30,7 @@ import { searchOpenPRsForReview, searchMergedPRs, searchMyOpenPRs } from '../api
 import type { OpenReviewCandidate, ParsedPR } from '../api/search';
 import { fetchPRReviews, computeMyReviewState, submitReview, fetchPRDetails, computeAllReviewersState } from '../api/reviews';
 import type { ReviewStateInfo } from '../api/reviews';
-import { fetchTimeline, getOutstandingDirectReview, getReviewRequestSource, type ReviewRequestSource } from '../api/timeline';
+import { fetchTimeline, getDirectReviewState, getReviewRequestSource, type ReviewRequestSource } from '../api/timeline';
 import { fetchUserTeamsByOrg } from '../api/user';
 import { githubClient, getGitHubErrorMessage } from '../api/githubClient';
 import { useHiddenPRs } from '../state/hiddenStore';
@@ -47,7 +47,7 @@ type HistoricalPR = PRItem & { requestSource: ReviewRequestSource };
 
 interface UserReviewHistory {
     requestSource: ReviewRequestSource | null;
-    outstandingDirectReview: ReviewStateInfo | null;
+    directReviewState: ReviewStateInfo | null;
 }
 
 interface TabPanelProps {
@@ -351,7 +351,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             const orgTeams = teamsByOrg[pr.owner.toLowerCase()] ?? [];
             const history = {
                 requestSource: getReviewRequestSource(events, userLogin, orgTeams, pr.mergedAt ?? pr.closedAt),
-                outstandingDirectReview: open ? getOutstandingDirectReview(events, userLogin) : null,
+                directReviewState: open ? getDirectReviewState(events, userLogin) : null,
             };
             timelineCache.set(cacheKey, { data: history, updatedAt: pr.updatedAt, timestamp: Date.now() });
             return history;
@@ -449,7 +449,7 @@ export const Dashboard: React.FC<DashboardProps> = ({
             if (!onlyDirectRequests) return fetchReviewState(pr, queue);
             if (pr.fromDirectRequest) return { state: 'PENDING', submittedAt: null };
             const history = await fetchReviewHistory(pr, queue);
-            return history.outstandingDirectReview;
+            return history.directReviewState;
         };
 
         try {

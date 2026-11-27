@@ -137,6 +137,13 @@ const cases: Array<[string, (root: ReturnType<typeof createRoot>) => Promise<voi
       check(row(225)?.textContent?.includes('Pending'), 'A repeat request should be pending despite the previous approval');
       check(row(237)?.textContent?.includes('Changes Requested'), 'A personal change request disappeared after a follow-up comment');
       check(!row(238), 'A comment after personal approval reopened the review');
+      const hideApproved = [...host.querySelectorAll('label')].find(label => label.textContent?.startsWith('Hide approved'))!;
+      await act(async () => { hideApproved.click(); });
+      check(row(238)?.textContent?.includes('Approved'), 'Clearing Hide approved should show the approved direct review');
+      check(!row(226), 'Clearing Hide approved should keep team-only requests out of the personal queue');
+      check(hideApproved.textContent === 'Hide approved (1)', 'The approved count should include the completed direct review');
+      await act(async () => { hideApproved.click(); });
+      check(!row(238) && row(225) && row(237), 'Hide approved should hide only the approved direct review');
       check(localStorage.getItem(directKey) === 'true', 'The filter should survive a reload');
       check(authorSearches === 1, 'Changing review scope re-fetched authored PRs');
 

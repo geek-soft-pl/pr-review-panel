@@ -33,7 +33,7 @@ export async function fetchTimeline(
 
 export type ReviewRequestSource = 'direct' | 'team';
 
-export function getOutstandingDirectReview(events: TimelineEvent[], login: string): ReviewStateInfo | null {
+export function getDirectReviewState(events: TimelineEvent[], login: string): ReviewStateInfo | null {
     const normalizedLogin = login.toLowerCase();
     const myEvents = events.filter(event =>
         event.requested_reviewer?.login.toLowerCase() === normalizedLogin ||
@@ -57,7 +57,7 @@ export function getOutstandingDirectReview(events: TimelineEvent[], login: strin
             }
         }
     }
-    return review?.state === 'APPROVED' ? null : review;
+    return review;
 }
 
 export function getReviewRequestSource(

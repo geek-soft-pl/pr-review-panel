@@ -12,9 +12,10 @@ It surfaces the three things the stock GitHub UI makes awkward to track:
 
 **Only direct review requests** is off by default and shared by both review tabs.
 Turn it on to see open PRs where someone requested your review directly. They stay
-in your queue after you comment or request changes, until you approve or the request
-is withdrawn. A new direct request reopens the review. In **Missing Approve**, the
-filter checks whether someone requested your review directly before merge.
+in your queue after you comment or request changes. Clear **Hide approved** to also
+see open PRs you have approved. A new direct request sets your review to pending,
+and withdrawing the request removes the PR from your personal queue. In **Missing
+Approve**, the filter checks whether someone requested your review directly before merge.
 The panel remembers your choice in this browser.
 
 Built with React 19, TypeScript, Vite and MUI. All data is fetched client-side

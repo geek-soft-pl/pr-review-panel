@@ -42,20 +42,25 @@ const changes = { ...commented, state: 'changes_requested', submitted_at: '2026-
 const followUp = { ...commented, submitted_at: '2026-11-16T15:00:14Z' };
 
 test('comments keep a direct review open and preserve its outstanding change request', () => {
-    assert.deepEqual(timeline.getOutstandingDirectReview([requested, commented], 'me'), {
+    assert.deepEqual(timeline.getDirectReviewState([requested, commented], 'me'), {
         state: 'COMMENTED', submittedAt: commented.submitted_at,
     });
     const otherApproval = { ...changes, user: { login: 'colleague' }, state: 'approved' };
-    assert.deepEqual(timeline.getOutstandingDirectReview([requested, commented, followUp, changes, otherApproval], 'me'), {
+    assert.deepEqual(timeline.getDirectReviewState([requested, commented, followUp, changes, otherApproval], 'me'), {
         state: 'CHANGES_REQUESTED', submittedAt: changes.submitted_at,
     });
 });
 
-test('personal approval closes the review even after a comment, and a new request starts a new review', () => {
+test('personal approval stays approved through comments and becomes pending on a new direct request', () => {
     const approved = { ...changes, state: 'approved' };
     const reRequested = { ...requested, created_at: '2026-11-15T09:00:00Z' };
-    assert.equal(timeline.getOutstandingDirectReview([requested, approved, followUp], 'me'), null);
-    assert.deepEqual(timeline.getOutstandingDirectReview([requested, approved, reRequested, followUp], 'me'), {
+    assert.deepEqual(timeline.getDirectReviewState([requested, commented, approved, followUp], 'me'), {
+        state: 'APPROVED', submittedAt: approved.submitted_at,
+    });
+    assert.deepEqual(timeline.getDirectReviewState([requested, approved, reRequested], 'me'), {
+        state: 'PENDING', submittedAt: null,
+    });
+    assert.deepEqual(timeline.getDirectReviewState([requested, approved, reRequested, followUp], 'me'), {
         state: 'COMMENTED', submittedAt: followUp.submitted_at,
     });
 });
@@ -63,9 +68,9 @@ test('personal approval closes the review even after a comment, and a new reques
 test('a team review, an unsolicited review and an explicitly withdrawn request stay out of the personal queue', () => {
     const team = { event: 'review_requested', requested_team: { name: 'Frontend', slug: 'frontend' }, created_at: requested.created_at };
     const removed = { ...requested, event: 'review_request_removed', created_at: '2026-11-15T09:00:00Z' };
-    assert.equal(timeline.getOutstandingDirectReview([team, changes], 'me'), null);
-    assert.equal(timeline.getOutstandingDirectReview([commented], 'me'), null);
-    assert.equal(timeline.getOutstandingDirectReview([requested, changes, removed, followUp], 'me'), null);
+    assert.equal(timeline.getDirectReviewState([team, changes], 'me'), null);
+    assert.equal(timeline.getDirectReviewState([commented], 'me'), null);
+    assert.equal(timeline.getDirectReviewState([requested, changes, removed, followUp], 'me'), null);
 });
 
 test('missing approvals distinguish a personal request before merge from a team request', () => {
